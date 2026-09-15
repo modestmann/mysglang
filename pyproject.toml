@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mysglang"
+version = "0.1.0"
+description = "A test-driven, from-scratch course for building an LLM serving engine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+serve = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+model = [
+    "huggingface-hub>=1,<2",
+    "safetensors>=0.8,<1",
+    "transformers>=5,<6",
+]
+flash-attn = [
+    "flash-attn>=2.8,<3",
+    "triton>=3,<4",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
