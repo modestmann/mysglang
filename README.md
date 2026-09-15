@@ -14,7 +14,7 @@ SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 
 
 - [x] M0：项目骨架、路线图和验收规则
 - [x] M1：纯 PyTorch 的 decoder-only forward 与 greedy generation
-- [ ] M2：请求生命周期与 tokenizer/streaming 协议
+- [x] M2：请求生命周期与增量 token 事件协议
 - [ ] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
 - [ ] M4：HTTP 服务与并发请求
 - [ ] M5：continuous batching 与公平调度
@@ -53,12 +53,12 @@ PYTHONPATH=src ~/nano-vllm/.venv/bin/python -m unittest discover -s tests -v
 
 ## 当前示例做了什么
 
-`TinyCausalLM` 保留 Qwen/Llama 类模型的关键形状，但刻意使用很小的随机权重：
+`TinyCausalLM` 保留 dense Qwen3 的关键结构，但刻意使用很小的随机权重：
 
 ```text
 token ids
   -> embedding
-  -> [RMSNorm -> QKV -> RoPE -> causal attention -> O projection
+  -> [RMSNorm -> Q/K/V -> Q/K RMSNorm -> RoPE -> causal attention -> O projection
       -> RMSNorm -> gated MLP] x N
   -> RMSNorm -> LM head -> logits
   -> argmax -> next token

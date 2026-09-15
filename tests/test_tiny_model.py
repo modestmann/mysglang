@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from mysglang import ModelConfig, TinyCausalLM, greedy_generate
+from mysglang.modeling.tiny import RMSNorm, RotaryEmbedding
 
 
 class TinyModelTest(unittest.TestCase):
@@ -45,6 +46,26 @@ class TinyModelTest(unittest.TestCase):
     def test_invalid_gqa_configuration_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "num_attention_heads"):
             ModelConfig(hidden_size=24, num_attention_heads=6, num_key_value_heads=4)
+
+    def test_rms_norm_matches_its_reference_equation(self) -> None:
+        norm = RMSNorm(hidden_size=3, eps=1e-6)
+        norm.weight.data.copy_(torch.tensor([0.5, 1.0, 1.5]))
+        inputs = torch.tensor([[[1.0, -2.0, 3.0]]])
+        expected = norm.weight * inputs * torch.rsqrt(inputs.square().mean(-1, keepdim=True) + 1e-6)
+        torch.testing.assert_close(norm(inputs), expected)
+
+    def test_rope_preserves_vector_norm(self) -> None:
+        rope = RotaryEmbedding(head_dim=6, max_positions=8, theta=10_000.0)
+        query = torch.randn(1, 4, 3, 6)
+        key = torch.randn(1, 2, 3, 6)
+        positions = torch.arange(3)
+        rotated_query, rotated_key = rope(query, key, positions)
+        torch.testing.assert_close(
+            rotated_query.square().sum(-1), query.square().sum(-1), atol=1e-5, rtol=1e-5
+        )
+        torch.testing.assert_close(
+            rotated_key.square().sum(-1), key.square().sum(-1), atol=1e-5, rtol=1e-5
+        )
 
 
 if __name__ == "__main__":

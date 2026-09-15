@@ -1,4 +1,4 @@
-"""Milestone 1: inspect logits and run the intentionally uncached generation loop."""
+"""Chapter 3 smoke test: inspect logits and run the uncached generation loop."""
 
 import torch
 
@@ -29,4 +29,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

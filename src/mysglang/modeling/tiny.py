@@ -25,23 +25,23 @@ class RotaryEmbedding(nn.Module):
         inv_freq = 1.0 / theta ** (torch.arange(0, head_dim, 2).float() / head_dim)
         positions = torch.arange(max_positions).float()
         frequencies = torch.outer(positions, inv_freq)
-        self.register_buffer("cos", frequencies.cos(), persistent=False)
-        self.register_buffer("sin", frequencies.sin(), persistent=False)
+        embeddings = torch.cat((frequencies, frequencies), dim=-1)
+        self.register_buffer("cos", embeddings.cos(), persistent=False)
+        self.register_buffer("sin", embeddings.sin(), persistent=False)
 
     def forward(
         self, query: torch.Tensor, key: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # query/key: [batch, heads, sequence, head_dim]
-        cos = self.cos[positions][None, None, :, :].to(query.dtype)
-        sin = self.sin[positions][None, None, :, :].to(query.dtype)
+        cos = self.cos[positions][None, None, :, :].to(dtype=query.dtype, device=query.device)
+        sin = self.sin[positions][None, None, :, :].to(dtype=query.dtype, device=query.device)
         return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
 
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    even, odd = x[..., 0::2], x[..., 1::2]
-    rotated_even = even * cos - odd * sin
-    rotated_odd = even * sin + odd * cos
-    return torch.stack((rotated_even, rotated_odd), dim=-1).flatten(-2)
+    half = x.shape[-1] // 2
+    rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
+    return x * cos + rotated * sin
 
 
 def _repeat_kv(x: torch.Tensor, repeats: int) -> torch.Tensor:
@@ -56,24 +56,25 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.head_dim
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_kv_heads * self.head_dim
-        self.qkv_proj = nn.Linear(config.hidden_size, q_size + 2 * kv_size, bias=False)
+        self.q_proj = nn.Linear(config.hidden_size, q_size, bias=False)
+        self.k_proj = nn.Linear(config.hidden_size, kv_size, bias=False)
+        self.v_proj = nn.Linear(config.hidden_size, kv_size, bias=False)
         self.o_proj = nn.Linear(q_size, config.hidden_size, bias=False)
+        self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.rope = RotaryEmbedding(
             self.head_dim, config.max_position_embeddings, config.rope_theta
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
-        q_size = self.num_heads * self.head_dim
-        kv_size = self.num_kv_heads * self.head_dim
-        query, key, value = self.qkv_proj(x).split((q_size, kv_size, kv_size), dim=-1)
 
         def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
             return tensor.view(batch_size, seq_len, heads, self.head_dim).transpose(1, 2)
 
-        query = split_heads(query, self.num_heads)
-        key = split_heads(key, self.num_kv_heads)
-        value = split_heads(value, self.num_kv_heads)
+        query = self.q_norm(split_heads(self.q_proj(x), self.num_heads))
+        key = self.k_norm(split_heads(self.k_proj(x), self.num_kv_heads))
+        value = split_heads(self.v_proj(x), self.num_kv_heads)
         positions = torch.arange(seq_len, device=x.device)
         query, key = self.rope(query, key, positions)
         repeats = self.num_heads // self.num_kv_heads
@@ -97,18 +98,18 @@ class GatedMLP(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        self.input_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.attention = CausalSelfAttention(config)
-        self.post_attention_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.self_attn = CausalSelfAttention(config)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = GatedMLP(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(self.input_norm(x))
-        return x + self.mlp(self.post_attention_norm(x))
+        x = x + self.self_attn(self.input_layernorm(x))
+        return x + self.mlp(self.post_attention_layernorm(x))
 
 
 class TinyCausalLM(nn.Module):
-    """A small Qwen/Llama-shaped model used as the correctness oracle.
+    """A tiny dense Qwen3 model used for Hugging Face correctness alignment.
 
     Milestone 1 intentionally has no KV cache: each generation step recomputes
     the complete prefix. Milestone 3 will optimize this without changing tokens.
@@ -121,7 +122,8 @@ class TinyCausalLM(nn.Module):
         self.layers = nn.ModuleList(DecoderLayer(config) for _ in range(config.num_layers))
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.lm_head.weight = self.embed_tokens.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         if input_ids.ndim != 2:
@@ -132,4 +134,3 @@ class TinyCausalLM(nn.Module):
         for layer in self.layers:
             hidden_states = layer(hidden_states)
         return self.lm_head(self.norm(hidden_states)).float()
-
