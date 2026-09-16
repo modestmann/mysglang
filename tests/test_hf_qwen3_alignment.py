@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from mysglang import ModelConfig, TinyCausalLM, greedy_generate
+from mysglang import ContiguousKVCache, ModelConfig, TinyCausalLM, greedy_generate
 
 try:
     from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -70,3 +70,33 @@ class HuggingFaceQwen3AlignmentTest(unittest.TestCase):
 
         actual = greedy_generate(self.model, prompt, max_new_tokens=4)
         self.assertTrue(torch.equal(actual, expected))
+
+    @torch.inference_mode()
+    def test_cached_decode_logits_match_hugging_face_dynamic_cache(self) -> None:
+        prompt = torch.tensor([[1, 5, 9]])
+        parameter = next(self.model.parameters())
+        cache = ContiguousKVCache.from_config(
+            self.config,
+            batch_size=1,
+            dtype=parameter.dtype,
+            device=parameter.device,
+        )
+
+        expected = self.reference(prompt, use_cache=True)
+        actual_logits = self.model(prompt, kv_cache=cache)
+        torch.testing.assert_close(actual_logits, expected.logits.float(), atol=1e-5, rtol=1e-5)
+
+        past_key_values = expected.past_key_values
+        next_token = expected.logits[:, -1].argmax(dim=-1, keepdim=True)
+        for _ in range(3):
+            expected = self.reference(
+                next_token,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            actual_logits = self.model(next_token, kv_cache=cache)
+            torch.testing.assert_close(
+                actual_logits, expected.logits.float(), atol=1e-5, rtol=1e-5
+            )
+            past_key_values = expected.past_key_values
+            next_token = expected.logits[:, -1].argmax(dim=-1, keepdim=True)

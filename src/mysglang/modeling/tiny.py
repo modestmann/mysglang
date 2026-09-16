@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from mysglang.config import ModelConfig
+
+if TYPE_CHECKING:
+    from mysglang.cache import ContiguousKVCache
 
 
 class RMSNorm(nn.Module):
@@ -49,8 +54,9 @@ def _repeat_kv(x: torch.Tensor, repeats: int) -> torch.Tensor:
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, layer_idx: int) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
@@ -66,7 +72,12 @@ class CausalSelfAttention(nn.Module):
             self.head_dim, config.max_position_embeddings, config.rope_theta
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: ContiguousKVCache | None,
+    ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
 
         def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
@@ -75,11 +86,24 @@ class CausalSelfAttention(nn.Module):
         query = self.q_norm(split_heads(self.q_proj(x), self.num_heads))
         key = self.k_norm(split_heads(self.k_proj(x), self.num_kv_heads))
         value = split_heads(self.v_proj(x), self.num_kv_heads)
-        positions = torch.arange(seq_len, device=x.device)
         query, key = self.rope(query, key, positions)
+        past_length = 0
+        if kv_cache is not None:
+            past_length = kv_cache.layer_length(self.layer_idx)
+            if past_length > 0 and seq_len != 1:
+                raise ValueError("cached decode currently accepts exactly one new token")
+            
+            key, value = kv_cache.append(self.layer_idx, key, value)#####
+
+            
         repeats = self.num_heads // self.num_kv_heads
         key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
-        output = F.scaled_dot_product_attention(query, key, value, is_causal=True)
+        output = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            is_causal=past_length == 0,
+        )
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(output)
 
@@ -96,15 +120,20 @@ class GatedMLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, layer_idx: int) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = CausalSelfAttention(config)
+        self.self_attn = CausalSelfAttention(config, layer_idx)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = GatedMLP(config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: ContiguousKVCache | None,
+    ) -> torch.Tensor:
+        x = x + self.self_attn(self.input_layernorm(x), positions, kv_cache)
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
@@ -119,18 +148,38 @@ class TinyCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList(DecoderLayer(config) for _ in range(config.num_layers))
+        self.layers = nn.ModuleList(
+            DecoderLayer(config, layer_idx) for layer_idx in range(config.num_layers)
+        )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        kv_cache: ContiguousKVCache | None = None,
+    ) -> torch.Tensor:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
-        if input_ids.size(1) > self.config.max_position_embeddings:
+        if input_ids.size(1) == 0:
+            raise ValueError("input_ids sequence must not be empty")
+        past_length = 0 if kv_cache is None else kv_cache.length
+        total_length = past_length + input_ids.size(1)
+        if total_length > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
+        if kv_cache is not None:
+            if kv_cache.batch_size != input_ids.size(0):
+                raise ValueError("input batch size must match KV cache batch size")
+            if total_length > kv_cache.max_length:
+                raise ValueError("sequence exceeds KV cache capacity")
+            if past_length > 0 and input_ids.size(1) != 1:
+                raise ValueError("cached decode currently accepts exactly one new token")
+
+        positions = torch.arange(past_length, total_length, device=input_ids.device)
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states = layer(hidden_states)
+            hidden_states = layer(hidden_states, positions, kv_cache)
         return self.lm_head(self.norm(hidden_states)).float()
