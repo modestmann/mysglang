@@ -15,8 +15,8 @@ SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 
 - [x] M0：项目骨架、路线图和验收规则
 - [x] M1：纯 PyTorch 的 decoder-only forward 与 greedy generation
 - [x] M2：请求生命周期与增量 token 事件协议
-- [ ] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
-- [ ] M4：HTTP 服务与并发请求
+- [x] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
+- [ ] M4：HTTP 服务与并发请求（当前学习：[第 5 章讲义](docs/05_http_and_concurrency.md)）
 - [ ] M5：continuous batching 与公平调度
 - [ ] M6：paged KV Cache 与显存池
 - [ ] M7：Radix prefix cache
@@ -64,7 +64,9 @@ token ids
   -> argmax -> next token
 ```
 
-当前 generation 每步重新计算整个序列，这是有意保留的性能基线。M3 会在不改变输出的前提下加入 KV Cache，并通过测试比较 cached/uncached logits。
+当前 generation 已使用逐请求连续 KV Cache；第 5 章在它外面加入 HTTP/SSE 和多个在途请求，
+但模型 forward 仍逐请求串行。continuous batching 会在下一章单独实现，避免把网络并发和模型
+batching 混为一谈。
 
 ## 范围约束
 

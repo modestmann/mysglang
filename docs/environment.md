@@ -8,7 +8,7 @@ MySGLang 的本地开发和验收统一使用：
 source ~/nano-vllm/.venv/bin/activate
 ```
 
-2026-09-15 的只读盘点结果：
+2026-09-16 的只读盘点结果：
 
 | 依赖 | 版本/状态 | 用途 |
 |---|---|---|
@@ -20,7 +20,9 @@ source ~/nano-vllm/.venv/bin/activate
 | FlashAttention | 2.8.3.post1 | 后续 GPU 高性能 Attention backend |
 | Triton | 3.7.1 | 后续 MoE/辅助 kernel 实验 |
 | NumPy | 2.5.2 | benchmark 数据处理 |
-| FastAPI/Uvicorn | 未安装 | 第 5 章开始前安装 `.[serve]` |
+| FastAPI | 0.141.1 | 第 5 章 HTTP schema 与 ASGI app |
+| Uvicorn | 0.53.0 | 第 5 章本地 HTTP server |
+| httpx | 0.28.1 | 第 5 章异步 ASGI/并发客户端测试 |
 | PyZMQ | 未安装 | 多进程章节再决定是否采用，不提前引入 |
 | pytest/ruff | 未安装 | 当前 unittest 无需它们；需要时安装 `.[dev]` |
 
@@ -31,7 +33,7 @@ source ~/nano-vllm/.venv/bin/activate
 逐章项目应让依赖跟功能一起出现：
 
 - M1-M2：只依赖 PyTorch，CPU 可运行轻量 smoke test；模型级对齐后续以 Hugging Face 为 oracle；
-- HTTP 章节：再加入 `fastapi` 和 `uvicorn`；
+- HTTP 章节：使用已有的 `fastapi`、`uvicorn` 和 `httpx`；
 - 真实模型章节：使用已有 `transformers`、`safetensors`；
 - GPU Attention 章节：使用已有 `flash-attn`，并检查实际 GPU compute capability；
 - 多进程章节：根据当时设计选择标准库 queue、PyZMQ 或其他 IPC。
