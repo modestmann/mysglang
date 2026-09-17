@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from mysglang.cache import ContiguousKVCache, SlotKVCache
 from mysglang.config import ModelConfig
-
-if TYPE_CHECKING:
-    from mysglang.cache import ContiguousKVCache
 
 
 class RMSNorm(nn.Module):
@@ -38,8 +34,17 @@ class RotaryEmbedding(nn.Module):
         self, query: torch.Tensor, key: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # query/key: [batch, heads, sequence, head_dim]
-        cos = self.cos[positions][None, None, :, :].to(dtype=query.dtype, device=query.device)
-        sin = self.sin[positions][None, None, :, :].to(dtype=query.dtype, device=query.device)
+        embeddings = self.cos[positions]
+        if positions.ndim == 1:
+            cos = embeddings[None, None, :, :]
+            sin = self.sin[positions][None, None, :, :]
+        elif positions.ndim == 2:
+            cos = embeddings[:, None, :, :]
+            sin = self.sin[positions][:, None, :, :]
+        else:
+            raise ValueError("positions must have shape [sequence] or [batch, sequence]")
+        cos = cos.to(dtype=query.dtype, device=query.device)
+        sin = sin.to(dtype=query.dtype, device=query.device)
         return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
 
 
@@ -76,7 +81,8 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: ContiguousKVCache | None,
+        kv_cache: ContiguousKVCache | SlotKVCache | None,
+        cache_slots: tuple[int, ...] | None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
 
@@ -88,21 +94,31 @@ class CausalSelfAttention(nn.Module):
         value = split_heads(self.v_proj(x), self.num_kv_heads)
         query, key = self.rope(query, key, positions)
         past_length = 0
-        if kv_cache is not None:
+        attention_mask = None
+        if isinstance(kv_cache, ContiguousKVCache):
             past_length = kv_cache.layer_length(self.layer_idx)
             if past_length > 0 and seq_len != 1:
                 raise ValueError("cached decode currently accepts exactly one new token")
-            
-            key, value = kv_cache.append(self.layer_idx, key, value)#####
+            key, value = kv_cache.append(self.layer_idx, key, value)
+        elif isinstance(kv_cache, SlotKVCache):
+            if cache_slots is None:
+                raise ValueError("cache_slots are required with SlotKVCache")
+            key, value, attention_mask = kv_cache.append(
+                self.layer_idx, key, value, cache_slots
+            )
+        elif kv_cache is not None:
+            raise TypeError(f"unsupported KV cache type: {type(kv_cache).__name__}")
 
-            
         repeats = self.num_heads // self.num_kv_heads
         key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
         output = F.scaled_dot_product_attention(
             query,
             key,
             value,
-            is_causal=past_length == 0,
+            attn_mask=attention_mask,
+            is_causal=kv_cache is None or (
+                isinstance(kv_cache, ContiguousKVCache) and past_length == 0
+            ),
         )
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(output)
@@ -131,18 +147,17 @@ class DecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: ContiguousKVCache | None,
+        kv_cache: ContiguousKVCache | SlotKVCache | None,
+        cache_slots: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), positions, kv_cache)
+        x = x + self.self_attn(
+            self.input_layernorm(x), positions, kv_cache, cache_slots
+        )
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
 class TinyCausalLM(nn.Module):
-    """A tiny dense Qwen3 model used for Hugging Face correctness alignment.
-
-    Milestone 1 intentionally has no KV cache: each generation step recomputes
-    the complete prefix. Milestone 3 will optimize this without changing tokens.
-    """
+    """A tiny dense Qwen3 model used for Hugging Face correctness alignment."""
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
@@ -160,26 +175,52 @@ class TinyCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         *,
-        kv_cache: ContiguousKVCache | None = None,
+        kv_cache: ContiguousKVCache | SlotKVCache | None = None,
+        cache_slots: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
         if input_ids.size(1) == 0:
             raise ValueError("input_ids sequence must not be empty")
-        past_length = 0 if kv_cache is None else kv_cache.length
-        total_length = past_length + input_ids.size(1)
-        if total_length > self.config.max_position_embeddings:
-            raise ValueError("sequence exceeds max_position_embeddings")
-        if kv_cache is not None:
+        if kv_cache is None:
+            if cache_slots is not None:
+                raise ValueError("cache_slots require a KV cache")
+            total_length = input_ids.size(1)
+            max_total_length = total_length
+            positions = torch.arange(total_length, device=input_ids.device)
+        elif isinstance(kv_cache, ContiguousKVCache):
+            if cache_slots is not None:
+                raise ValueError("cache_slots are only valid with SlotKVCache")
+            past_length = kv_cache.length
+            total_length = past_length + input_ids.size(1)
+            max_total_length = total_length
             if kv_cache.batch_size != input_ids.size(0):
                 raise ValueError("input batch size must match KV cache batch size")
             if total_length > kv_cache.max_length:
                 raise ValueError("sequence exceeds KV cache capacity")
             if past_length > 0 and input_ids.size(1) != 1:
                 raise ValueError("cached decode currently accepts exactly one new token")
+            positions = torch.arange(past_length, total_length, device=input_ids.device)
+        elif isinstance(kv_cache, SlotKVCache):
+            if cache_slots is None:
+                raise ValueError("cache_slots are required with SlotKVCache")
+            if len(cache_slots) != input_ids.size(0):
+                raise ValueError("cache_slots length must match input batch size")
+            past_lengths = kv_cache.lengths(cache_slots)
+            total_lengths = tuple(length + input_ids.size(1) for length in past_lengths)
+            max_total_length = max(total_lengths)
+            if max(total_lengths) > kv_cache.max_length:
+                raise ValueError("sequence exceeds KV cache capacity")
+            starts = torch.tensor(past_lengths, device=input_ids.device)[:, None]
+            offsets = torch.arange(input_ids.size(1), device=input_ids.device)[None, :]
+            positions = starts + offsets
+        else:
+            raise TypeError(f"unsupported KV cache type: {type(kv_cache).__name__}")
 
-        positions = torch.arange(past_length, total_length, device=input_ids.device)
+        if max_total_length > self.config.max_position_embeddings:
+            raise ValueError("sequence exceeds max_position_embeddings")
+
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, positions, kv_cache)
+            hidden_states = layer(hidden_states, positions, kv_cache, cache_slots)
         return self.lm_head(self.norm(hidden_states)).float()

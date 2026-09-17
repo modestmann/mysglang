@@ -16,8 +16,8 @@ SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 
 - [x] M1：纯 PyTorch 的 decoder-only forward 与 greedy generation
 - [x] M2：请求生命周期与增量 token 事件协议
 - [x] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
-- [ ] M4：HTTP 服务与并发请求（当前学习：[第 5 章讲义](docs/05_http_and_concurrency.md)）
-- [ ] M5：continuous batching 与公平调度
+- [x] M4：HTTP 服务与并发请求
+- [ ] M5：continuous batching 与公平调度（当前学习：[第 6 章讲义](docs/06_continuous_batching.md)）
 - [ ] M6：paged KV Cache 与显存池
 - [ ] M7：Radix prefix cache
 - [ ] M8：FlashAttention backend 与 CUDA Graph
@@ -64,9 +64,9 @@ token ids
   -> argmax -> next token
 ```
 
-当前 generation 已使用逐请求连续 KV Cache；第 5 章在它外面加入 HTTP/SSE 和多个在途请求，
-但模型 forward 仍逐请求串行。continuous batching 会在下一章单独实现，避免把网络并发和模型
-batching 混为一谈。
+当前 Scheduler 可以让新请求动态加入 Decode batch；固定 slot cache 支持不同历史长度的请求
+执行一次 batched forward。它仍会为每个 slot 预留完整上下文，并在 Attention 前 gather/pad
+历史 K/V；下一章会用 paged KV Cache 解决这些显存和复制问题。
 
 ## 范围约束
 

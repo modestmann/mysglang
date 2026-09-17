@@ -5,6 +5,7 @@ import torch
 from mysglang import (
     ContiguousKVCache,
     ModelConfig,
+    SlotKVCache,
     TinyCausalLM,
     greedy_generate,
     greedy_generate_cached,
@@ -95,6 +96,55 @@ class ContiguousKVCacheTest(unittest.TestCase):
 
         cache.reset()
         self.assertEqual(cache.length, 0)
+
+
+class SlotKVCacheTest(unittest.TestCase):
+    def setUp(self) -> None:
+        torch.manual_seed(654)
+        self.config = ModelConfig(
+            vocab_size=32,
+            hidden_size=24,
+            intermediate_size=48,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=16,
+        )
+        self.model = TinyCausalLM(self.config).eval()
+        parameter = next(self.model.parameters())
+        self.cache = SlotKVCache.from_config(
+            self.config,
+            num_slots=2,
+            dtype=parameter.dtype,
+            device=parameter.device,
+        )
+
+    @torch.inference_mode()
+    def test_variable_length_slots_decode_in_one_batch(self) -> None:
+        first = torch.tensor([[1, 2, 3]])
+        second = torch.tensor([[4, 5, 6, 7, 8]])
+        first_logits = self.model(first, kv_cache=self.cache, cache_slots=(0,))
+        second_logits = self.model(second, kv_cache=self.cache, cache_slots=(1,))
+        first_token = first_logits[:, -1].argmax(dim=-1, keepdim=True)
+        second_token = second_logits[:, -1].argmax(dim=-1, keepdim=True)
+
+        batched_tokens = torch.cat((first_token, second_token), dim=0)
+        actual = self.model(batched_tokens, kv_cache=self.cache, cache_slots=(0, 1))
+        expected_first = self.model(torch.cat((first, first_token), dim=1))[:, -1]
+        expected_second = self.model(torch.cat((second, second_token), dim=1))[:, -1]
+
+        torch.testing.assert_close(actual[0, -1], expected_first[0], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual[1, -1], expected_second[0], atol=1e-5, rtol=1e-5)
+
+    @torch.inference_mode()
+    def test_chunked_prefill_matches_full_prefill(self) -> None:
+        prompt = torch.tensor([[1, 2, 3, 4, 5]])
+        self.model(prompt[:, :2], kv_cache=self.cache, cache_slots=(0,))
+        actual = self.model(prompt[:, 2:], kv_cache=self.cache, cache_slots=(0,))
+        expected = self.model(prompt)[:, 2:]
+
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        self.assertEqual(self.cache.lengths((0,)), (5,))
 
 
 if __name__ == "__main__":

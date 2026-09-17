@@ -4,15 +4,35 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import FastAPI, HTTPException, Request as HTTPRequest
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from mysglang.core import FinishReason
+from mysglang.core import FinishReason, Request as CoreRequest
 
-from .service import GenerationChunk, GenerationService, GenerationSession
+from .service import GenerationChunk
+
+
+class ServingSession(Protocol):
+    service: ServingBackend
+    request: CoreRequest
+
+    def __aiter__(self) -> AsyncIterator[GenerationChunk]: ...
+
+
+class ServingBackend(Protocol):
+    def start(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        eos_token_id: int | None = None,
+        ignore_eos: bool = False,
+    ) -> ServingSession: ...
+
+    async def abort(self, request_id: str) -> bool: ...
 
 ###每个请求进来都先被包装成一个GenerationSession ，各个GenerationSession 共享一个GenerationService类，然后去调用_run_session，调用start_prefill()和start_decode
 class GenerateRequest(BaseModel):
@@ -53,7 +73,7 @@ def _usage(chunk: GenerationChunk) -> dict[str, int]:
     }
 
 #非流式输出
-async def _collect(session: GenerationSession) -> tuple[str, list[int], GenerationChunk]:
+async def _collect(session: ServingSession) -> tuple[str, list[int], GenerationChunk]:
     text_parts: list[str] = []
     token_ids: list[int] = []
     last: GenerationChunk | None = None
@@ -67,7 +87,7 @@ async def _collect(session: GenerationSession) -> tuple[str, list[int], Generati
 
 #流式输出
 async def _sse(
-    session: GenerationSession,
+    session: ServingSession,
     http_request: HTTPRequest,
     encode: Callable[[GenerationChunk], dict],
 ) -> AsyncIterator[bytes]:
@@ -90,7 +110,7 @@ async def _sse(
             await session.service.abort(session.request.request_id)
 
 
-def create_app(service: GenerationService) -> FastAPI:
+def create_app(service: ServingBackend) -> FastAPI:
     app = FastAPI(title="MySGLang", version="0.1.0")
 
     def start_session(
@@ -98,7 +118,7 @@ def create_app(service: GenerationService) -> FastAPI:
         max_tokens: int,
         eos_token_id: int | None,
         ignore_eos: bool,
-    ) -> GenerationSession:
+    ) -> ServingSession:
         try:
             return service.start(
                 prompt,

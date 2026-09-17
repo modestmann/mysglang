@@ -69,6 +69,10 @@
 
 验收：混合长 Prefill/短 Decode 压测中无饥饿，并报告 TTFT、TPOT、吞吐和 p95/p99。
 
+当前教学实现和源码导读见 [06_continuous_batching.md](06_continuous_batching.md)。本章使用混合
+synthetic workload 验证动态 Decode batch、Prefill token budget、有界公平策略和指标统计管线；
+评测章节再使用真实 checkpoint 与稳定 workload 形成可横向比较的报告。
+
 ### 第 7 章：Paged KV Cache 与显存管理
 
 实现 block pool、逻辑 block table、按需分配、回收和 OOM-safe admission。页表属于运行时；Attention backend 只消费其只读视图。

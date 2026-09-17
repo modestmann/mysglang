@@ -6,7 +6,8 @@ import httpx
 import torch
 
 from mysglang import ModelConfig, TinyCausalLM
-from mysglang.serving import GenerationService
+from mysglang.scheduler import SchedulerConfig
+from mysglang.serving import ContinuousBatchGenerationService, GenerationService
 from mysglang.serving.http import create_app
 from mysglang.tokenizer import ByteTokenizer
 
@@ -71,6 +72,53 @@ class GenerationServiceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(service.stats.active_requests, 0)
         self.assertEqual(service.stats.aborted_requests, 1)
+
+
+class ContinuousBatchGenerationServiceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_sessions_share_a_decode_forward(self) -> None:
+        original = make_service()
+        service = ContinuousBatchGenerationService(
+            original.model,
+            original.tokenizer,
+            SchedulerConfig(max_running_requests=4, prefill_token_budget=32),
+        )
+        first = service.start("first", max_new_tokens=5)
+        second = service.start("第二个", max_new_tokens=5)
+
+        async def collect(session) -> list[int]:
+            return [chunk.token_id async for chunk in session]
+
+        first_tokens, second_tokens = await asyncio.gather(collect(first), collect(second))
+        self.assertEqual(len(first_tokens), 5)
+        self.assertEqual(len(second_tokens), 5)
+        self.assertEqual(service.scheduler.stats.max_decode_batch_size, 2)
+        self.assertEqual(service.stats.finished_requests, 2)
+        self.assertEqual(service.stats.active_requests, 0)
+
+    async def test_concurrent_http_requests_use_the_batch_scheduler(self) -> None:
+        original = make_service()
+        service = ContinuousBatchGenerationService(
+            original.model,
+            original.tokenizer,
+            SchedulerConfig(max_running_requests=4, prefill_token_budget=32),
+        )
+        transport = httpx.ASGITransport(app=create_app(service))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first, second = await asyncio.gather(
+                client.post(
+                    "/generate",
+                    json={"prompt": "first", "max_tokens": 5},
+                ),
+                client.post(
+                    "/generate",
+                    json={"prompt": "第二个", "max_tokens": 5},
+                ),
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertNotEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(service.scheduler.stats.max_decode_batch_size, 2)
 
 
 class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
