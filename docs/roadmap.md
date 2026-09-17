@@ -79,6 +79,8 @@ synthetic workload 验证动态 Decode batch、Prefill token budget、有界公�
 
 验收：随机申请/释放的 property test；无重复页、无泄漏、OOM 前拒绝请求而不是进程崩溃。
 
+当前教学实现和源码导读见 [07_paged_kv_cache.md](07_paged_kv_cache.md)。
+
 ### 第 8 章：RadixAttention 与前缀缓存
 
 实现压缩 Radix Tree、页对齐匹配、节点分裂、引用计数和 LRU eviction。

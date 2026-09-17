@@ -7,7 +7,11 @@ from dataclasses import dataclass
 
 from mysglang.core import FinishReason, IncrementalOutput, Request, SamplingParams
 from mysglang.modeling.tiny import TinyCausalLM
-from mysglang.scheduler import ContinuousBatchScheduler, SchedulerConfig
+from mysglang.scheduler import (
+    ContinuousBatchScheduler,
+    PagedBatchScheduler,
+    SchedulerConfig,
+)
 from mysglang.tokenizer import ByteTokenizer
 
 from .service import GenerationChunk, ServiceStats
@@ -31,11 +35,15 @@ class ContinuousBatchGenerationService:
         model: TinyCausalLM,
         tokenizer: ByteTokenizer,
         scheduler_config: SchedulerConfig,
+        *,
+        scheduler_type: type[ContinuousBatchScheduler] | type[PagedBatchScheduler] = (
+            ContinuousBatchScheduler
+        ),
     ) -> None:
         if model.config.vocab_size != tokenizer.vocab_size:
             raise ValueError("model vocab_size must match tokenizer vocab_size")
         self.tokenizer = tokenizer
-        self.scheduler = ContinuousBatchScheduler(model, scheduler_config)
+        self.scheduler = scheduler_type(model, scheduler_config)
         self._request_ids = itertools.count()
         self._queues: dict[str, asyncio.Queue[IncrementalOutput | BaseException]] = {}
         self._worker_task: asyncio.Task[None] | None = None

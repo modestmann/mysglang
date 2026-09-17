@@ -6,7 +6,11 @@ import httpx
 import torch
 
 from mysglang import ModelConfig, TinyCausalLM
-from mysglang.scheduler import SchedulerConfig
+from mysglang.scheduler import (
+    PagedBatchScheduler,
+    PagedSchedulerConfig,
+    SchedulerConfig,
+)
 from mysglang.serving import ContinuousBatchGenerationService, GenerationService
 from mysglang.serving.http import create_app
 from mysglang.tokenizer import ByteTokenizer
@@ -119,6 +123,33 @@ class ContinuousBatchGenerationServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status_code, 200)
         self.assertNotEqual(first.json()["id"], second.json()["id"])
         self.assertEqual(service.scheduler.stats.max_decode_batch_size, 2)
+
+    async def test_paged_scheduler_uses_the_same_http_protocol(self) -> None:
+        original = make_service()
+        service = ContinuousBatchGenerationService(
+            original.model,
+            original.tokenizer,
+            PagedSchedulerConfig(
+                max_running_requests=4,
+                prefill_token_budget=32,
+                num_pages=8,
+                page_size=4,
+            ),
+            scheduler_type=PagedBatchScheduler,
+        )
+        transport = httpx.ASGITransport(app=create_app(service))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first, second = await asyncio.gather(
+                client.post("/generate", json={"prompt": "first", "max_tokens": 5}),
+                client.post("/generate", json={"prompt": "第二个", "max_tokens": 5}),
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(service.scheduler.stats.max_decode_batch_size, 2)
+        memory = service.scheduler.cache.allocator.stats
+        self.assertEqual(memory.free_pages, memory.total_pages)
+        self.assertEqual(memory.reserved_pages, 0)
 
 
 class HTTPServingTest(unittest.IsolatedAsyncioTestCase):

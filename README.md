@@ -17,8 +17,8 @@ SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 
 - [x] M2：请求生命周期与增量 token 事件协议
 - [x] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
 - [x] M4：HTTP 服务与并发请求
-- [ ] M5：continuous batching 与公平调度（当前学习：[第 6 章讲义](docs/06_continuous_batching.md)）
-- [ ] M6：paged KV Cache 与显存池
+- [x] M5：continuous batching 与公平调度
+- [ ] M6：paged KV Cache 与显存池（当前学习：[第 7 章讲义](docs/07_paged_kv_cache.md)）
 - [ ] M7：Radix prefix cache
 - [ ] M8：FlashAttention backend 与 CUDA Graph
 - [ ] M9：多进程与 tensor parallelism
@@ -64,9 +64,9 @@ token ids
   -> argmax -> next token
 ```
 
-当前 Scheduler 可以让新请求动态加入 Decode batch；固定 slot cache 支持不同历史长度的请求
-执行一次 batched forward。它仍会为每个 slot 预留完整上下文，并在 Attention 前 gather/pad
-历史 K/V；下一章会用 paged KV Cache 解决这些显存和复制问题。
+当前 Paged Scheduler 使用共享物理 page pool、每请求 block table 和 OOM-safe reservation；请求只
+按实际进度绑定 physical pages。PyTorch reference attention 仍会 gather/pad 历史 K/V，后续
+FlashAttention 2 backend 将直接消费物理 pool、block tables 和 sequence lengths。
 
 ## 范围约束
 

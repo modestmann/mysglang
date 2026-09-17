@@ -20,3 +20,18 @@ class SchedulerConfig:
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+
+
+@dataclass(frozen=True)
+class PagedSchedulerConfig(SchedulerConfig):
+    num_pages: int = 64
+    page_size: int = 4
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for name in ("num_pages", "page_size"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer")
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
