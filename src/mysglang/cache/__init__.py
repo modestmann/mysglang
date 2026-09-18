@@ -2,6 +2,12 @@
 
 from .contiguous import ContiguousKVCache
 from .paged import PageAllocationError, PageAllocator, PageAllocatorStats, PagedKVCache
+from .radix import (
+    RadixCacheHandle,
+    RadixCacheStats,
+    RadixPagedKVCache,
+    RadixPrefixCache,
+)
 from .slot import SlotKVCache
 
 __all__ = [
@@ -10,5 +16,9 @@ __all__ = [
     "PageAllocator",
     "PageAllocatorStats",
     "PagedKVCache",
+    "RadixCacheHandle",
+    "RadixCacheStats",
+    "RadixPagedKVCache",
+    "RadixPrefixCache",
     "SlotKVCache",
 ]

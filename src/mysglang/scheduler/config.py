@@ -7,7 +7,8 @@ from dataclasses import dataclass
 class SchedulerConfig:
     max_running_requests: int = 8
     prefill_token_budget: int = 64
-    max_consecutive_prefill_steps: int = 1#当 Prefill 和 Decode 都有工作时，最多允许连续执行多少个 Prefill step，之后必须执行一次 Decode
+    # Prefill 和 Decode 都有工作时，连续 Prefill 的上限。
+    max_consecutive_prefill_steps: int = 1
 
     def __post_init__(self) -> None:
         for name in (
@@ -35,3 +36,8 @@ class PagedSchedulerConfig(SchedulerConfig):
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+
+
+@dataclass(frozen=True)
+class RadixSchedulerConfig(PagedSchedulerConfig):
+    """Paged scheduler settings with page-aligned prefix reuse enabled."""

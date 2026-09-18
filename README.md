@@ -18,8 +18,8 @@ SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 
 - [x] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
 - [x] M4：HTTP 服务与并发请求
 - [x] M5：continuous batching 与公平调度
-- [ ] M6：paged KV Cache 与显存池（当前学习：[第 7 章讲义](docs/07_paged_kv_cache.md)）
-- [ ] M7：Radix prefix cache
+- [x] M6：paged KV Cache 与显存池
+- [ ] M7：Radix prefix cache（当前学习：[第 8 章讲义](docs/08_radix_prefix_cache.md)）
 - [ ] M8：FlashAttention backend 与 CUDA Graph
 - [ ] M9：多进程与 tensor parallelism
 - [ ] M10：Qwen3 MoE、真实权重加载与云端验收
@@ -64,9 +64,10 @@ token ids
   -> argmax -> next token
 ```
 
-当前 Paged Scheduler 使用共享物理 page pool、每请求 block table 和 OOM-safe reservation；请求只
-按实际进度绑定 physical pages。PyTorch reference attention 仍会 gather/pad 历史 K/V，后续
-FlashAttention 2 backend 将直接消费物理 pool、block tables 和 sequence lengths。
+当前 Radix Scheduler 在 paged pool 之上保留已完成请求的完整 KV pages，用压缩 Radix
+Tree 完成 page-aligned prefix match、引用保护和 LRU eviction。PyTorch reference attention
+仍会 gather/pad 历史 K/V；第 9 章将让 FlashAttention backend 直接消费物理 pool、
+block tables 和 sequence lengths。
 
 ## 范围约束
 

@@ -10,6 +10,7 @@ from mysglang.modeling.tiny import TinyCausalLM
 from mysglang.scheduler import (
     ContinuousBatchScheduler,
     PagedBatchScheduler,
+    RadixBatchScheduler,
     SchedulerConfig,
 )
 from mysglang.tokenizer import ByteTokenizer
@@ -36,9 +37,9 @@ class ContinuousBatchGenerationService:
         tokenizer: ByteTokenizer,
         scheduler_config: SchedulerConfig,
         *,
-        scheduler_type: type[ContinuousBatchScheduler] | type[PagedBatchScheduler] = (
-            ContinuousBatchScheduler
-        ),
+        scheduler_type: (
+            type[ContinuousBatchScheduler] | type[PagedBatchScheduler] | type[RadixBatchScheduler]
+        ) = ContinuousBatchScheduler,
     ) -> None:
         if model.config.vocab_size != tokenizer.vocab_size:
             raise ValueError("model vocab_size must match tokenizer vocab_size")
@@ -79,11 +80,11 @@ class ContinuousBatchGenerationService:
             prompt_token_ids,
             params,
         )
-        #进入调度
+        # 进入调度
         self.scheduler.add(request)
-        #每个请求的 Queue 保存的是：这个请求在多次 scheduler step / 模型推理中陆续产生的输出事件，尚未被 session/HTTP 消费的 token 事件
+        # 每个 Queue 保存该请求尚未被 session/HTTP 消费的输出事件。
         self._queues[request.request_id] = asyncio.Queue()
-        #给这个请求准备一个输出通道，之后把它生成的 token 送回对应 HTTP/session
+        # 给这个请求准备一个输出通道，之后把它生成的 token 送回对应 HTTP/session
         return ContinuousGenerationSession(self, request, len(prompt_token_ids))
 
     async def abort(self, request_id: str) -> bool:
@@ -102,10 +103,8 @@ class ContinuousBatchGenerationService:
     async def _run_scheduler(self) -> None:
         try:
             while self.scheduler.has_work:
-
-#Scheduler 决定本轮做：Prefill或者Decode
+                # Scheduler 决定本轮做：Prefill或者Decode
                 step = self.scheduler.step()
-
 
                 if step is not None:
                     for event in step.outputs:
@@ -119,13 +118,14 @@ class ContinuousBatchGenerationService:
             raise
         finally:
             self._worker_task = None
-##多个请求创建多个生成器
+
+    ##多个请求创建多个生成器
     async def _run_session(
         self, session: ContinuousGenerationSession
     ) -> AsyncIterator[GenerationChunk]:
         queue = self._queues[session.request.request_id]
         decoder = self.tokenizer.new_incremental_decoder()
-        self._ensure_worker()#_sse/_collect-----_run_session----_ensure_worker-----_run_scheduler
+        self._ensure_worker()  # _sse/_collect-----_run_session----_ensure_worker-----_run_scheduler
 
         ##哦哦真正调度队列在scheduler._watting队列    _ensure_worker-----_run_scheduler全局唯一
         try:

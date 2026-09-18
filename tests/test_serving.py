@@ -9,6 +9,8 @@ from mysglang import ModelConfig, TinyCausalLM
 from mysglang.scheduler import (
     PagedBatchScheduler,
     PagedSchedulerConfig,
+    RadixBatchScheduler,
+    RadixSchedulerConfig,
     SchedulerConfig,
 )
 from mysglang.serving import ContinuousBatchGenerationService, GenerationService
@@ -151,6 +153,32 @@ class ContinuousBatchGenerationServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory.free_pages, memory.total_pages)
         self.assertEqual(memory.reserved_pages, 0)
 
+    async def test_radix_scheduler_reuses_prefix_through_http(self) -> None:
+        original = make_service()
+        service = ContinuousBatchGenerationService(
+            original.model,
+            original.tokenizer,
+            RadixSchedulerConfig(
+                max_running_requests=4,
+                prefill_token_budget=32,
+                num_pages=24,
+                page_size=4,
+            ),
+            scheduler_type=RadixBatchScheduler,
+        )
+        transport = httpx.ASGITransport(app=create_app(service))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.post(
+                "/generate", json={"prompt": "shared-prefix/first", "max_tokens": 3}
+            )
+            second = await client.post(
+                "/generate", json={"prompt": "shared-prefix/second", "max_tokens": 3}
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertGreater(service.scheduler.cache.prefix_cache.stats.matched_tokens, 0)
+
 
 class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -166,11 +194,14 @@ class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
         non_streaming = await self.client.post("/generate", json=payload)
         self.assertEqual(non_streaming.status_code, 200)
         body = non_streaming.json()
-        self.assertEqual(body["usage"], {
-            "prompt_tokens": 5,
-            "completion_tokens": 4,
-            "total_tokens": 9,
-        })
+        self.assertEqual(
+            body["usage"],
+            {
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+                "total_tokens": 9,
+            },
+        )
         self.assertEqual(body["finish_reason"], "length")
 
         payload["stream"] = True

@@ -1,6 +1,13 @@
 """MySGLang public API for the current milestone."""
 
-from .cache import ContiguousKVCache, PageAllocator, PagedKVCache, SlotKVCache
+from .cache import (
+    ContiguousKVCache,
+    PageAllocator,
+    PagedKVCache,
+    RadixPagedKVCache,
+    RadixPrefixCache,
+    SlotKVCache,
+)
 from .config import ModelConfig
 from .core import (
     FinishReason,
@@ -20,6 +27,8 @@ __all__ = [
     "ContiguousKVCache",
     "PageAllocator",
     "PagedKVCache",
+    "RadixPagedKVCache",
+    "RadixPrefixCache",
     "SlotKVCache",
     "ModelConfig",
     "Request",

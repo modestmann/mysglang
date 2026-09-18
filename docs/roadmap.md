@@ -89,6 +89,8 @@ synthetic workload 验证动态 Decode batch、Prefill token budget、有界公�
 
 验收：共享前缀 workload 的计算 token 数下降；reset 后所有页可回收；随机操作保持树和页池不变量。
 
+当前教学实现和源码导读见 [08_radix_prefix_cache.md](08_radix_prefix_cache.md)。
+
 ### 第 9 章：FlashAttention 与 CUDA Graph
 
 定义稳定的 AttentionBackend 协议：PyTorch reference backend 用作算子级 oracle，FlashAttention 2 backend 用于 GPU Prefill/Decode；两者主要在 GPU 上对齐，CPU 只做可选 smoke test。后端负责 kernel metadata，Scheduler 不导入 FlashAttention。
