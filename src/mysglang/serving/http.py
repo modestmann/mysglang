@@ -4,37 +4,20 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
-from typing import Literal, Protocol
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request as HTTPRequest
+from fastapi import FastAPI, HTTPException
+from fastapi import Request as HTTPRequest
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from mysglang.core import FinishReason, Request as CoreRequest
+from mysglang.core import FinishReason
 
-from .service import GenerationChunk
-
-
-class ServingSession(Protocol):
-    service: ServingBackend
-    request: CoreRequest
-
-    def __aiter__(self) -> AsyncIterator[GenerationChunk]: ...
+from .service import GenerationChunk, GenerationService, GenerationSession
 
 
-class ServingBackend(Protocol):
-    def start(
-        self,
-        prompt: str,
-        *,
-        max_new_tokens: int,
-        eos_token_id: int | None = None,
-        ignore_eos: bool = False,
-    ) -> ServingSession: ...
-
-    async def abort(self, request_id: str) -> bool: ...
-
-###每个请求进来都先被包装成一个GenerationSession ，各个GenerationSession 共享一个GenerationService类，然后去调用_run_session，调用start_prefill()和start_decode
+# 每个 HTTP 请求会包装成独立 session；这些 session 共享同一个 GenerationService，
+# 再由 request 专属 Queue 接收全局 Scheduler worker 路由回来的 token。
 class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int = Field(default=16, gt=0)
@@ -72,8 +55,9 @@ def _usage(chunk: GenerationChunk) -> dict[str, int]:
         "total_tokens": chunk.prompt_tokens + chunk.completion_tokens,
     }
 
-#非流式输出
-async def _collect(session: ServingSession) -> tuple[str, list[int], GenerationChunk]:
+
+# 非流式输出：消费完整 session 后一次返回。
+async def _collect(session: GenerationSession) -> tuple[str, list[int], GenerationChunk]:
     text_parts: list[str] = []
     token_ids: list[int] = []
     last: GenerationChunk | None = None
@@ -85,9 +69,10 @@ async def _collect(session: ServingSession) -> tuple[str, list[int], GenerationC
         raise RuntimeError("generation produced no output")
     return "".join(text_parts), token_ids, last
 
-#流式输出
+
+# 流式输出：逐 token 编码为 SSE；断连或取消时必须 abort 并释放 KV 页面。
 async def _sse(
-    session: ServingSession,
+    session: GenerationSession,
     http_request: HTTPRequest,
     encode: Callable[[GenerationChunk], dict],
 ) -> AsyncIterator[bytes]:
@@ -110,7 +95,7 @@ async def _sse(
             await session.service.abort(session.request.request_id)
 
 
-def create_app(service: ServingBackend) -> FastAPI:
+def create_app(service: GenerationService) -> FastAPI:
     app = FastAPI(title="MySGLang", version="0.1.0")
 
     def start_session(
@@ -118,7 +103,7 @@ def create_app(service: ServingBackend) -> FastAPI:
         max_tokens: int,
         eos_token_id: int | None,
         ignore_eos: bool,
-    ) -> ServingSession:
+    ) -> GenerationSession:
         try:
             return service.start(
                 prompt,
@@ -133,7 +118,7 @@ def create_app(service: ServingBackend) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-#两种请求格式
+    # 保留简单 generate 与 OpenAI 风格 chat 两种请求格式。
     @app.post("/generate")
     async def generate(payload: GenerateRequest, request: HTTPRequest):
         session = start_session(
@@ -141,7 +126,7 @@ def create_app(service: ServingBackend) -> FastAPI:
             payload.max_tokens,
             payload.eos_token_id,
             payload.ignore_eos,
-        )##初始化
+        )
         if payload.stream:
             return StreamingResponse(
                 _sse(

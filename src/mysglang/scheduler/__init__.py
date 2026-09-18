@@ -1,16 +1,10 @@
-"""Continuous batching policy and execution loop."""
+"""The final paged + radix continuous-batching scheduler."""
 
-from .config import PagedSchedulerConfig, RadixSchedulerConfig, SchedulerConfig
-from .paged_scheduler import PagedBatchScheduler
-from .radix_scheduler import RadixBatchScheduler
-from .scheduler import ContinuousBatchScheduler, SchedulerStats, SchedulerStep
+from .config import SchedulerConfig
+from .scheduler import Scheduler, SchedulerStats, SchedulerStep
 
 __all__ = [
-    "ContinuousBatchScheduler",
-    "PagedBatchScheduler",
-    "PagedSchedulerConfig",
-    "RadixBatchScheduler",
-    "RadixSchedulerConfig",
+    "Scheduler",
     "SchedulerConfig",
     "SchedulerStats",
     "SchedulerStep",

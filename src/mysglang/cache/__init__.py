@@ -1,6 +1,5 @@
-"""KV-cache implementations, from contiguous teaching cache to paged storage."""
+"""Paged KV storage and its radix prefix index."""
 
-from .contiguous import ContiguousKVCache
 from .paged import PageAllocationError, PageAllocator, PageAllocatorStats, PagedKVCache
 from .radix import (
     RadixCacheHandle,
@@ -8,10 +7,8 @@ from .radix import (
     RadixPagedKVCache,
     RadixPrefixCache,
 )
-from .slot import SlotKVCache
 
 __all__ = [
-    "ContiguousKVCache",
     "PageAllocationError",
     "PageAllocator",
     "PageAllocatorStats",
@@ -20,5 +17,4 @@ __all__ = [
     "RadixCacheStats",
     "RadixPagedKVCache",
     "RadixPrefixCache",
-    "SlotKVCache",
 ]

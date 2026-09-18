@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
 
 
 class RequestState(str, Enum):
@@ -25,10 +25,10 @@ class InvalidStateTransition(RuntimeError):
 
 @dataclass(frozen=True)
 class SamplingParams:
-    """Sampling options whose behavior is implemented in the current chapter.
+    """Sampling options implemented by the current greedy path.
 
-    Temperature, top-k and top-p will be added together with a real sampler.
-    Declaring them now would let callers request behavior that MySGLang ignores.
+    Temperature, top-k and top-p are intentionally absent until a real sampler
+    implements them, so callers cannot request behavior that would be ignored.
     """
 
     max_new_tokens: int
@@ -44,8 +44,8 @@ class SamplingParams:
             _validate_token_id(self.eos_token_id, name="eos_token_id")
 
 
+# 冻结字段：增量输出事件创建后不允许被消费者修改。
 @dataclass(frozen=True)
-#冻结字段
 class IncrementalOutput:
     """One ordered output event emitted by the request state machine."""
 
@@ -70,6 +70,7 @@ class IncrementalOutput:
             raise ValueError("a non-abort event must contain a token")
 
 
+# 不可修改的集合，集中描述 Request 状态迁移表。
 _ALLOWED_TRANSITIONS = {
     RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED}),
     RequestState.PREFILL: frozenset({RequestState.DECODING, RequestState.ABORTED}),
@@ -77,7 +78,7 @@ _ALLOWED_TRANSITIONS = {
     RequestState.FINISHED: frozenset(),
     RequestState.ABORTED: frozenset(),
 }
-#不可修改的集合,状态迁移表
+
 
 @dataclass
 class Request:
@@ -93,7 +94,8 @@ class Request:
         if not isinstance(self.request_id, str) or not self.request_id:
             raise ValueError("request_id must not be empty")
         self.prompt_token_ids = _validate_prompt(self.prompt_token_ids)
-#额外的构造函数，外部输入包装成请求
+
+    # 额外的构造函数：把外部的 token iterable 规范化后包装成请求。
     @classmethod
     def from_token_ids(
         cls,
@@ -112,6 +114,13 @@ class Request:
         return tuple(self._output_token_ids)
 
     @property
+    def last_output_token_id(self) -> int:
+        """Return the newest generated token without copying the full history."""
+        if not self._output_token_ids:
+            raise RuntimeError("request has not generated any output tokens")
+        return self._output_token_ids[-1]
+
+    @property
     def all_token_ids(self) -> tuple[int, ...]:
         return self.prompt_token_ids + self.output_token_ids
 
@@ -128,7 +137,8 @@ class Request:
 
     def start_decode(self) -> None:
         self._transition_to(RequestState.DECODING)
-#接收模型刚生成的一个 token，记录它，判断请求是否结束，并生成一条增量输出事件
+
+    # 接收模型刚生成的一个 token，记录它，判断请求是否结束，并生成增量输出事件。
     def record_token(self, token_id: int) -> IncrementalOutput:
         if self.state is not RequestState.DECODING:
             raise InvalidStateTransition(
@@ -170,7 +180,8 @@ class Request:
         if self.num_output_tokens >= params.max_new_tokens:
             return FinishReason.LENGTH
         return None
-#状态转移验证
+
+    # 所有状态转移都经过这里验证，避免请求跳过必要阶段。
     def _transition_to(self, new_state: RequestState) -> None:
         if new_state not in _ALLOWED_TRANSITIONS[self.state]:
             raise InvalidStateTransition(

@@ -1,0 +1,214 @@
+import random
+import unittest
+
+import torch
+
+from mysglang.cache import PageAllocator, PagedKVCache, RadixPrefixCache
+from tests.helpers import make_model
+
+
+class PageAllocatorTest(unittest.TestCase):
+    def test_failed_reservation_is_atomic(self) -> None:
+        allocator = PageAllocator(num_pages=4, page_size=4)
+        self.assertTrue(allocator.reserve_request("first", max_tokens=12))
+        before = allocator.stats
+
+        self.assertFalse(allocator.reserve_request("second", max_tokens=8))
+
+        self.assertEqual(allocator.stats, before)
+        self.assertEqual(allocator.request_ids, frozenset({"first"}))
+        allocator.check_integrity()
+
+    def test_random_lifecycle_preserves_allocator_invariants(self) -> None:
+        rng = random.Random(1234)
+        allocator = PageAllocator(num_pages=12, page_size=4)
+        limits: dict[str, int] = {}
+        next_id = 0
+
+        for _ in range(500):
+            operation = rng.choice(("reserve", "grow", "release"))
+            if operation == "reserve":
+                request_id = f"req-{next_id}"
+                limit = rng.randint(1, 12)
+                if allocator.reserve_request(request_id, limit):
+                    limits[request_id] = limit
+                    next_id += 1
+            elif operation == "grow" and limits:
+                request_id = rng.choice(tuple(limits))
+                allocator.ensure_capacity(request_id, rng.randint(0, limits[request_id]))
+            elif operation == "release" and limits:
+                request_id = rng.choice(tuple(limits))
+                allocator.release(request_id)
+                limits.pop(request_id)
+            allocator.check_integrity()
+
+        for request_id in tuple(limits):
+            allocator.release(request_id)
+        allocator.check_integrity()
+        self.assertEqual(allocator.stats.free_pages, allocator.stats.total_pages)
+
+
+class PagedKVCacheTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.model = make_model(seed=2468)
+        parameter = next(self.model.parameters())
+        self.cache = PagedKVCache.from_config(
+            self.model.config,
+            num_pages=8,
+            page_size=2,
+            dtype=parameter.dtype,
+            device=parameter.device,
+        )
+
+    @torch.inference_mode()
+    def test_variable_length_requests_decode_in_one_batch(self) -> None:
+        first = torch.tensor([[1, 2, 3]])
+        second = torch.tensor([[4, 5, 6, 7, 8]])
+        self.assertTrue(self.cache.reserve_request("first", 8))
+        self.assertTrue(self.cache.reserve_request("second", 8))
+        self.cache.ensure_capacity("first", first.size(1))
+        self.cache.ensure_capacity("second", second.size(1))
+        first_logits = self.model(
+            first,
+            kv_cache=self.cache,
+            cache_request_ids=("first",),
+        )
+        second_logits = self.model(
+            second,
+            kv_cache=self.cache,
+            cache_request_ids=("second",),
+        )
+        first_token = first_logits[:, -1].argmax(dim=-1, keepdim=True)
+        second_token = second_logits[:, -1].argmax(dim=-1, keepdim=True)
+
+        self.cache.ensure_capacity("first", 4)
+        self.cache.ensure_capacity("second", 6)
+        actual = self.model(
+            torch.cat((first_token, second_token), dim=0),
+            kv_cache=self.cache,
+            cache_request_ids=("first", "second"),
+        )
+        expected_first = self.model(torch.cat((first, first_token), dim=1))[:, -1]
+        expected_second = self.model(torch.cat((second, second_token), dim=1))[:, -1]
+
+        torch.testing.assert_close(actual[0, -1], expected_first[0], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(actual[1, -1], expected_second[0], atol=1e-5, rtol=1e-5)
+        self.cache.check_integrity()
+
+    @torch.inference_mode()
+    def test_chunked_prefill_crosses_page_boundaries(self) -> None:
+        prompt = torch.tensor([[1, 2, 3, 4, 5]])
+        self.assertTrue(self.cache.reserve_request("chunked", 8))
+        self.cache.ensure_capacity("chunked", 2)
+        self.model(
+            prompt[:, :2],
+            kv_cache=self.cache,
+            cache_request_ids=("chunked",),
+        )
+        self.cache.ensure_capacity("chunked", 5)
+
+        actual = self.model(
+            prompt[:, 2:],
+            kv_cache=self.cache,
+            cache_request_ids=("chunked",),
+        )
+
+        torch.testing.assert_close(actual, self.model(prompt)[:, 2:], atol=1e-5, rtol=1e-5)
+        self.assertEqual(self.cache.lengths(("chunked",)), (5,))
+        self.assertEqual(len(self.cache.allocator.page_table("chunked")), 3)
+
+    @torch.inference_mode()
+    def test_reused_pages_do_not_expose_stale_kv(self) -> None:
+        self.assertTrue(self.cache.reserve_request("old", 8))
+        self.cache.ensure_capacity("old", 4)
+        self.model(
+            torch.tensor([[1, 1, 1, 1]]),
+            kv_cache=self.cache,
+            cache_request_ids=("old",),
+        )
+        released = self.cache.release_request("old")
+
+        prompt = torch.tensor([[7, 6, 5]])
+        self.assertTrue(self.cache.reserve_request("new", 8))
+        self.cache.ensure_capacity("new", 3)
+        self.assertTrue(set(released) & set(self.cache.allocator.page_table("new")))
+        actual = self.model(
+            prompt,
+            kv_cache=self.cache,
+            cache_request_ids=("new",),
+        )
+
+        torch.testing.assert_close(actual, self.model(prompt), atol=1e-5, rtol=1e-5)
+        self.cache.check_integrity()
+
+
+class RadixPrefixCacheTest(unittest.TestCase):
+    def test_reset_handles_root_and_rejects_stale_cached_handle(self) -> None:
+        cache = RadixPrefixCache(page_size=2)
+        root_handle = cache.match_prefix((1, 2))
+        cache.lock(root_handle)
+        cache.reset()
+        cache.unlock(root_handle)
+
+        stale = cache.insert_prefix((1, 2), (0,)).handle
+        cache.reset()
+        with self.assertRaisesRegex(RuntimeError, "current tree"):
+            cache.lock(stale)
+
+        evicted = cache.insert_prefix((3, 4), (1,)).handle
+        cache.evict_pages(1)
+        with self.assertRaisesRegex(RuntimeError, "current tree"):
+            cache.lock(evicted)
+
+    def test_page_aligned_match_splits_compressed_edge(self) -> None:
+        cache = RadixPrefixCache(page_size=2)
+        inserted = cache.insert_prefix(range(1, 9), (10, 11, 12, 13))
+        self.assertEqual(inserted.already_cached_len, 0)
+
+        match = cache.match_prefix((1, 2, 3, 4, 99, 100))
+        self.assertEqual(match.cached_len, 4)
+        self.assertEqual(match.pages, (10, 11))
+        branch = cache.insert_prefix((1, 2, 3, 4, 7, 7), (10, 11, 20))
+        self.assertEqual(branch.already_cached_len, 4)
+        cache.check_integrity()
+
+    def test_locked_prefix_is_protected_from_lru_eviction(self) -> None:
+        cache = RadixPrefixCache(page_size=2)
+        protected = cache.insert_prefix((1, 2, 3, 4), (0, 1)).handle
+        cache.insert_prefix((8, 8, 9, 9), (2, 3))
+        cache.lock(protected)
+
+        self.assertEqual(set(cache.evict_pages(1)), {2, 3})
+        self.assertEqual(cache.match_prefix((1, 2, 3, 4)).pages, (0, 1))
+        self.assertEqual(cache.match_prefix((8, 8, 9, 9)).cached_len, 0)
+
+        cache.unlock(protected)
+        self.assertEqual(set(cache.evict_pages(1)), {0, 1})
+        cache.check_integrity()
+
+    def test_random_insert_match_and_evict_preserve_tree_invariants(self) -> None:
+        rng = random.Random(2026)
+        cache = RadixPrefixCache(page_size=2)
+        next_page = 0
+
+        for _ in range(200):
+            if cache.stats.cached_pages and rng.random() < 0.25:
+                cache.evict_pages(rng.randint(1, cache.stats.evictable_pages))
+            else:
+                page_count = rng.randint(1, 4)
+                tokens = tuple(rng.randrange(8) for _ in range(page_count * 2))
+                pages = list(cache.match_prefix(tokens).pages)
+                while len(pages) < page_count:
+                    pages.append(next_page)
+                    next_page += 1
+                cache.insert_prefix(tokens, pages)
+            cache.check_integrity()
+
+        returned = cache.reset()
+        self.assertEqual(len(returned), len(set(returned)))
+        self.assertEqual(cache.stats.cached_pages, 0)
+        cache.check_integrity()
+
+
+if __name__ == "__main__":
+    unittest.main()

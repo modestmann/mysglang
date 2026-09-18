@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mysglang.cache import ContiguousKVCache, PagedKVCache, SlotKVCache
+from mysglang.cache import PagedKVCache
 from mysglang.config import ModelConfig
 
 
@@ -81,8 +81,7 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: ContiguousKVCache | SlotKVCache | PagedKVCache | None,
-        cache_slots: tuple[int, ...] | None,
+        kv_cache: PagedKVCache | None,
         cache_request_ids: tuple[str, ...] | None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
@@ -94,27 +93,13 @@ class CausalSelfAttention(nn.Module):
         key = self.k_norm(split_heads(self.k_proj(x), self.num_kv_heads))
         value = split_heads(self.v_proj(x), self.num_kv_heads)
         query, key = self.rope(query, key, positions)
-        past_length = 0
         attention_mask = None
-        if isinstance(kv_cache, ContiguousKVCache):
-            past_length = kv_cache.layer_length(self.layer_idx)
-            if past_length > 0 and seq_len != 1:
-                raise ValueError("cached decode currently accepts exactly one new token")
-            key, value = kv_cache.append(self.layer_idx, key, value)
-        elif isinstance(kv_cache, SlotKVCache):
-            if cache_slots is None:
-                raise ValueError("cache_slots are required with SlotKVCache")
-            key, value, attention_mask = kv_cache.append(
-                self.layer_idx, key, value, cache_slots
-            )
-        elif isinstance(kv_cache, PagedKVCache):
+        if kv_cache is not None:
             if cache_request_ids is None:
                 raise ValueError("cache_request_ids are required with PagedKVCache")
             key, value, attention_mask = kv_cache.append(
                 self.layer_idx, key, value, cache_request_ids
             )
-        elif kv_cache is not None:
-            raise TypeError(f"unsupported KV cache type: {type(kv_cache).__name__}")
 
         repeats = self.num_heads // self.num_kv_heads
         key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
@@ -123,8 +108,7 @@ class CausalSelfAttention(nn.Module):
             key,
             value,
             attn_mask=attention_mask,
-            is_causal=kv_cache is None
-            or (isinstance(kv_cache, ContiguousKVCache) and past_length == 0),
+            is_causal=kv_cache is None,
         )
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(output)
@@ -153,15 +137,13 @@ class DecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        kv_cache: ContiguousKVCache | SlotKVCache | PagedKVCache | None,
-        cache_slots: tuple[int, ...] | None,
+        kv_cache: PagedKVCache | None,
         cache_request_ids: tuple[str, ...] | None,
     ) -> torch.Tensor:
         x = x + self.self_attn(
             self.input_layernorm(x),
             positions,
             kv_cache,
-            cache_slots,
             cache_request_ids,
         )
         return x + self.mlp(self.post_attention_layernorm(x))
@@ -186,8 +168,7 @@ class TinyCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         *,
-        kv_cache: ContiguousKVCache | SlotKVCache | PagedKVCache | None = None,
-        cache_slots: tuple[int, ...] | None = None,
+        kv_cache: PagedKVCache | None = None,
         cache_request_ids: tuple[str, ...] | None = None,
     ) -> torch.Tensor:
         if input_ids.ndim != 2:
@@ -195,44 +176,13 @@ class TinyCausalLM(nn.Module):
         if input_ids.size(1) == 0:
             raise ValueError("input_ids sequence must not be empty")
         if kv_cache is None:
-            if cache_slots is not None or cache_request_ids is not None:
-                raise ValueError("cache selectors require a KV cache")
-            total_length = input_ids.size(1)
-            max_total_length = total_length
-            positions = torch.arange(total_length, device=input_ids.device)
-        elif isinstance(kv_cache, ContiguousKVCache):
-            if cache_slots is not None or cache_request_ids is not None:
-                raise ValueError("cache selectors are not valid with ContiguousKVCache")
-            past_length = kv_cache.length
-            total_length = past_length + input_ids.size(1)
-            max_total_length = total_length
-            if kv_cache.batch_size != input_ids.size(0):
-                raise ValueError("input batch size must match KV cache batch size")
-            if total_length > kv_cache.max_length:
-                raise ValueError("sequence exceeds KV cache capacity")
-            if past_length > 0 and input_ids.size(1) != 1:
-                raise ValueError("cached decode currently accepts exactly one new token")
-            positions = torch.arange(past_length, total_length, device=input_ids.device)
-        elif isinstance(kv_cache, SlotKVCache):
-            if cache_slots is None:
-                raise ValueError("cache_slots are required with SlotKVCache")
             if cache_request_ids is not None:
-                raise ValueError("cache_request_ids are only valid with PagedKVCache")
-            if len(cache_slots) != input_ids.size(0):
-                raise ValueError("cache_slots length must match input batch size")
-            past_lengths = kv_cache.lengths(cache_slots)
-            total_lengths = tuple(length + input_ids.size(1) for length in past_lengths)
-            max_total_length = max(total_lengths)
-            if max(total_lengths) > kv_cache.max_length:
-                raise ValueError("sequence exceeds KV cache capacity")
-            starts = torch.tensor(past_lengths, device=input_ids.device)[:, None]
-            offsets = torch.arange(input_ids.size(1), device=input_ids.device)[None, :]
-            positions = starts + offsets
+                raise ValueError("cache selectors require a KV cache")
+            max_total_length = input_ids.size(1)
+            positions = torch.arange(max_total_length, device=input_ids.device)
         elif isinstance(kv_cache, PagedKVCache):
             if cache_request_ids is None:
                 raise ValueError("cache_request_ids are required with PagedKVCache")
-            if cache_slots is not None:
-                raise ValueError("cache_slots are only valid with SlotKVCache")
             if len(cache_request_ids) != input_ids.size(0):
                 raise ValueError("cache_request_ids length must match input batch size")
             past_lengths = kv_cache.lengths(cache_request_ids)
@@ -253,7 +203,6 @@ class TinyCausalLM(nn.Module):
                 hidden_states,
                 positions,
                 kv_cache,
-                cache_slots,
                 cache_request_ids,
             )
         return self.lm_head(self.norm(hidden_states)).float()

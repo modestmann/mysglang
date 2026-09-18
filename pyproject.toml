@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mysglang"
 version = "0.1.0"
-description = "A test-driven, from-scratch course for building an LLM serving engine"
+description = "A compact reference implementation of a paged, radix-cached LLM server"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -1,13 +1,9 @@
-"""Single-process serving protocol used before continuous batching."""
+"""Async sessions backed by the shared continuous-batching scheduler."""
 
-from .batched_service import ContinuousBatchGenerationService, ContinuousGenerationSession
-from .service import GenerationChunk, GenerationService, GenerationSession, ServiceStats
+from .service import GenerationChunk, GenerationService, GenerationSession
 
 __all__ = [
-    "ContinuousBatchGenerationService",
-    "ContinuousGenerationSession",
     "GenerationChunk",
     "GenerationService",
     "GenerationSession",
-    "ServiceStats",
 ]

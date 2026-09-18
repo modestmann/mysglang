@@ -7,8 +7,8 @@ from dataclasses import dataclass
 class ModelConfig:
     """Architecture-only configuration for the tiny decoder model.
 
-    It intentionally contains no serving options. Cache size, batch limits and
-    devices will belong to an EngineConfig in a later milestone.
+    It intentionally contains no serving options; cache size and batch limits
+    belong to ``SchedulerConfig``.
     """
 
     vocab_size: int = 256

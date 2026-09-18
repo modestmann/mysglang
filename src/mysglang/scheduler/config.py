@@ -5,39 +5,25 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SchedulerConfig:
+    """Configuration for the single paged + radix scheduler."""
+
     max_running_requests: int = 8
     prefill_token_budget: int = 64
     # Prefill 和 Decode 都有工作时，连续 Prefill 的上限。
     max_consecutive_prefill_steps: int = 1
+    num_pages: int = 64
+    page_size: int = 4
 
     def __post_init__(self) -> None:
         for name in (
             "max_running_requests",
             "prefill_token_budget",
             "max_consecutive_prefill_steps",
+            "num_pages",
+            "page_size",
         ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
-
-
-@dataclass(frozen=True)
-class PagedSchedulerConfig(SchedulerConfig):
-    num_pages: int = 64
-    page_size: int = 4
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        for name in ("num_pages", "page_size"):
-            value = getattr(self, name)
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise TypeError(f"{name} must be an integer")
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-
-
-@dataclass(frozen=True)
-class RadixSchedulerConfig(PagedSchedulerConfig):
-    """Paged scheduler settings with page-aligned prefix reuse enabled."""

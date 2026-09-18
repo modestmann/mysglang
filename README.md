@@ -1,77 +1,68 @@
 # MySGLang
 
-MySGLang 是一个以测试驱动、逐章演进的教学型 LLM 推理框架。目标不是复制完整
-SGLang，而是亲手实现一条可解释、可验证、最后能在云端 GPU 跑 Qwen3 MoE 的推理链路。
+MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前主路径已经从单请求生成演进为：
 
-每章遵循同一循环：
+- 显式请求状态与增量输出事件；
+- continuous batching、chunked prefill 和动态 decode batch；
+- 共享 Paged KV Cache、容量预留和 OOM-safe admission；
+- page-aligned Radix prefix cache、引用保护与按需淘汰；
+- HTTP/JSON、SSE 流式输出和 abort 清理。
 
-1. 先运行 reference implementation，建立正确性基线；
-2. 写最小实现，并用单元测试验证；
-3. 加入 benchmark，记录延迟、吞吐或显存变化；
-4. 再进入下一项优化，避免同时改变多个变量。
+项目目前仍以 tiny dense Qwen3 和 PyTorch reference attention 验证调度、缓存与模型语义，不是完整的生产推理框架。下一阶段才会接入真实模型、GPU attention backend 和正式评测。
 
-## 当前状态
+## 当前主调用链
 
-- [x] M0：项目骨架、路线图和验收规则
-- [x] M1：纯 PyTorch 的 decoder-only forward 与 greedy generation
-- [x] M2：请求生命周期与增量 token 事件协议
-- [x] M3：逐层 KV Cache，证明 decode 从重复计算前缀变为只计算新 token
-- [x] M4：HTTP 服务与并发请求
-- [x] M5：continuous batching 与公平调度
-- [x] M6：paged KV Cache 与显存池
-- [ ] M7：Radix prefix cache（当前学习：[第 8 章讲义](docs/08_radix_prefix_cache.md)）
-- [ ] M8：FlashAttention backend 与 CUDA Graph
-- [ ] M9：多进程与 tensor parallelism
-- [ ] M10：Qwen3 MoE、真实权重加载与云端验收
-- [ ] M11：评测套件与回归报告
-- [ ] M12（可选）：speculative decoding / host KV cache
+```text
+HTTP / caller
+  -> GenerationService.start
+       -> tokenize + validate
+       -> GenerationSession（此时尚未入队）
+  -> 首次消费 GenerationSession
+       -> Scheduler.add
+       -> 注册 request_id 对应的输出 Queue
+       -> 单一 scheduler worker
+            -> Scheduler
+                 -> paged + radix cache
+                 -> TinyCausalLM
+  <- IncrementalOutput / SSE
+```
 
-完整设计和各章验收标准见 [docs/roadmap.md](docs/roadmap.md)。
+`GenerationService.start()` 只校验请求并返回一次性消费的 `GenerationSession`。直到调用方首次迭代 session，请求才进入 Scheduler，并创建 Queue、启动 worker；从未消费的 session 不占调度槽、KV reservation 或物理页。
 
-## 第一次运行
+全局 `Scheduler` 决定下一次 forward 运行哪些请求；每请求 Queue 只是输出邮箱，保存该请求尚未被调用方消费的 token 事件。一个 worker 可以在同一次 decode forward 中处理多个请求，再按 `request_id` 把结果分发到各自 Queue。对外主类已收敛为 `Scheduler` / `SchedulerConfig` 和 `GenerationService` / `GenerationSession`，没有可切换的旧调度后端。
 
-本项目统一复用 `nano-vllm` 的 Python 3.12 环境：
+## 代码入口
+
+| 目录 | 职责 |
+|---|---|
+| `src/mysglang/core/` | Request、SamplingParams、状态转换和输出事件 |
+| `src/mysglang/modeling/` | 可读的 tiny Qwen3 reference model |
+| `src/mysglang/scheduler/` | continuous batching、paged/radix 调度 |
+| `src/mysglang/cache/` | KV 物理池、页表、分配器和前缀缓存 |
+| `src/mysglang/serving/` | session、输出路由与 HTTP/SSE 边界 |
+| `src/mysglang/tokenizer/` | 当前 byte tokenizer 协议替身 |
+
+当前设计、关键不变量和与 Mini-SGLang 的对比见 [docs/design.md](docs/design.md)，后续工程顺序见 [docs/roadmap.md](docs/roadmap.md)。
+
+## 本地运行
+
+当前工作区复用 `nano-vllm` 的 Python 3.12 环境：
 
 ```bash
 cd /home/sheep/mysglang
 source ~/nano-vllm/.venv/bin/activate
 PYTHONPATH=src python -m unittest discover -s tests -v
-PYTHONPATH=src python examples/01_forward_and_generate.py
 ```
 
-当前章节不需要重新安装依赖，也不要求 pytest。需要导入包时暂时使用
-`PYTHONPATH=src`；等公共 API 稳定后再做 editable install。
+项目的依赖边界以 `pyproject.toml` 为准：基础实现只要求 PyTorch；`serve`、`model`、`flash-attn` 和 `dev` extras 分别对应 HTTP、真实模型、GPU backend 和开发工具。具体 Python、PyTorch、CUDA、GPU 与 commit 信息应由未来评测脚本写入结果，而不在文档中维护容易过期的环境快照。
 
-当前环境清单和后续 extras 说明见 [docs/environment.md](docs/environment.md)。
+## 当前边界
 
-也可以不激活环境，直接使用解释器绝对路径：
+- 只有随机 tiny dense 模型，尚未加载真实 Qwen3/Qwen3 MoE 权重；
+- 只实现 greedy sampling，byte tokenizer 也只是协议测试替身；
+- PyTorch attention 会 gather/pad 离散历史 K/V，没有直接消费物理 page pool；
+- Scheduler 为单进程同步 step，Prefill 尚未组成高效的 ragged multi-request batch；
+- 没有 CUDA Graph、Tensor Parallel、多进程容错或正式 benchmark client；
+- 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 
-```bash
-PYTHONPATH=src ~/nano-vllm/.venv/bin/python examples/01_forward_and_generate.py
-PYTHONPATH=src ~/nano-vllm/.venv/bin/python -m unittest discover -s tests -v
-```
-
-## 当前示例做了什么
-
-`TinyCausalLM` 保留 dense Qwen3 的关键结构，但刻意使用很小的随机权重：
-
-```text
-token ids
-  -> embedding
-  -> [RMSNorm -> Q/K/V -> Q/K RMSNorm -> RoPE -> causal attention -> O projection
-      -> RMSNorm -> gated MLP] x N
-  -> RMSNorm -> LM head -> logits
-  -> argmax -> next token
-```
-
-当前 Radix Scheduler 在 paged pool 之上保留已完成请求的完整 KV pages，用压缩 Radix
-Tree 完成 page-aligned prefix match、引用保护和 LRU eviction。PyTorch reference attention
-仍会 gather/pad 历史 K/V；第 9 章将让 FlashAttention backend 直接消费物理 pool、
-block tables 和 sequence lengths。
-
-## 范围约束
-
-- 高性能 Attention 只优先适配 FlashAttention；始终保留 PyTorch reference backend。
-- 本地小显存/无 GPU 环境使用 tiny config 做正确性验证；真实 Qwen3 MoE 在云 GPU 验收。
-- 第一版只做文本生成，不做 VLM、量化、LoRA、复杂 grammar。
-- 不追求一次写完。每个里程碑必须先通过 correctness test，再做性能优化。
+这些限制属于明确的后续工作，不应被当前 reference 路径的正确性掩盖。

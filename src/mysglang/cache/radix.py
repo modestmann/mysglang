@@ -132,12 +132,18 @@ class RadixPrefixCache:
         return RadixInsertResult(matched, RadixCacheHandle(len(tokens), node))
 
     def lock(self, handle: RadixCacheHandle) -> None:
+        if self._is_root_handle(handle):
+            return
+        self._validate_current_handle(handle)
         node = handle.node
         while node is not self.root:
             node.ref_count += 1
             node = self._parent(node)
 
     def unlock(self, handle: RadixCacheHandle) -> None:
+        if self._is_root_handle(handle):
+            return
+        self._validate_current_handle(handle)
         node = handle.node
         while node is not self.root:
             if node.ref_count <= 0:
@@ -168,6 +174,7 @@ class RadixPrefixCache:
                 continue
             parent = self._parent(node)
             del parent.children[self._edge_key(node.key)]
+            node.parent = None
             evicted.extend(node.pages)
             if parent is not self.root and not parent.children and parent.ref_count == 0:
                 heapq.heappush(leaves, (parent.timestamp, parent.node_id, parent))
@@ -308,6 +315,18 @@ class RadixPrefixCache:
             yield node
             stack.extend(node.children.values())
 
+    @staticmethod
+    def _is_root_handle(handle: RadixCacheHandle) -> bool:
+        node = handle.node
+        return handle.cached_len == 0 and node.parent is None and not node.key and not node.pages
+
+    def _validate_current_handle(self, handle: RadixCacheHandle) -> None:
+        node = handle.node
+        while node.parent is not None:
+            node = node.parent
+        if node is not self.root:
+            raise RuntimeError("radix handle does not belong to the current tree")
+
 
 class RadixPagedKVCache(PagedKVCache):
     """Paged KV storage whose complete pages can outlive and serve requests."""
@@ -368,17 +387,33 @@ class RadixPagedKVCache(PagedKVCache):
         return super().ensure_capacity(request_id, num_tokens)
 
     def finish_request(self, request_id: str, token_ids: Sequence[int]) -> tuple[int, ...]:
+        self.publish_prefix(request_id, token_ids)
+        self.prefix_cache.unlock(self._handles.pop(request_id))
+        return super().release_request(request_id)
+
+    def publish_prefix(self, request_id: str, token_ids: Sequence[int]) -> int:
+        """Publish all complete, already-computed pages of an active request.
+
+        The request keeps a lock on the canonical prefix, so another request can
+        reuse it immediately while the publisher is still decoding.
+        """
         self._validate_request(request_id)
         length = self.lengths((request_id,))[0]
         cacheable_length = min(length, len(token_ids))
         cacheable_length -= cacheable_length % self.page_size
+        previous = self._handles[request_id]
+        if cacheable_length <= previous.cached_len:
+            return previous.cached_len
+
         table = self.allocator.page_table(request_id)
         pages = table[: cacheable_length // self.page_size]
         result = self.prefix_cache.insert_prefix(tuple(token_ids)[:cacheable_length], pages)
         self.allocator.mark_cached(result.handle.pages)
         self.allocator.replace_prefix(request_id, result.handle.pages)
-        self.prefix_cache.unlock(self._handles.pop(request_id))
-        return super().release_request(request_id)
+        self.prefix_cache.lock(result.handle)
+        self._handles[request_id] = result.handle
+        self.prefix_cache.unlock(previous)
+        return result.handle.cached_len
 
     def release_request(self, request_id: str) -> tuple[int, ...]:
         handle = self._handles.pop(request_id, None)
@@ -387,6 +422,8 @@ class RadixPagedKVCache(PagedKVCache):
         return super().release_request(request_id)
 
     def reset_prefix_cache(self) -> None:
+        if self._handles or self.allocator.request_ids:
+            raise RuntimeError("cannot reset the prefix cache while requests are active")
         pages = self.prefix_cache.reset()
         self.allocator.evict_cached(pages)
 
@@ -397,6 +434,9 @@ class RadixPagedKVCache(PagedKVCache):
             raise RuntimeError("radix tree and allocator disagree about cached pages")
         if set(self._handles) != set(self.allocator.request_ids):
             raise RuntimeError("radix handles and active cache requests disagree")
+        tree_nodes = set(self.prefix_cache._nodes())
+        if any(handle.node not in tree_nodes for handle in self._handles.values()):
+            raise RuntimeError("an active radix handle points outside the current tree")
         committed = self.allocator.stats.reserved_pages + self.prefix_cache.stats.protected_pages
         if committed > self.num_pages:
             raise RuntimeError("protected prefixes and request reservations exceed the pool")

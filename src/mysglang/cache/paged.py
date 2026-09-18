@@ -26,6 +26,14 @@ class PageAllocatorStats:
     cached_pages: int = 0
 
 
+@dataclass
+class _Allocation:
+    page_table: list[int]
+    max_tokens: int
+    reserved_pages: int
+    shared_prefix_pages: int
+
+
 class PageAllocator:
     """Own physical page IDs, per-request block tables, and admission reservations."""
 
@@ -39,21 +47,13 @@ class PageAllocator:
         self.page_size = page_size
         self._free_pages = set(range(num_pages))  # 空闲物理页编号
         self._cached_pages: set[int] = set()
-        self._page_tables: dict[str, list[int]] = {}
-        """
-         请求页表
-          {
-      "request-A": [0, 2],
-      "request-B": [1],
-          }
-        """
-
-        self._max_tokens: dict[str, int] = {}
-        self._reserved_page_counts: dict[str, int] = {}
+        # 请求页表、最大 token 容量和 admission 预留承诺必须一起增删。
+        # 例如："request-A" -> page_table=[0, 2]，"request-B" -> page_table=[1]。
+        self._allocations: dict[str, _Allocation] = {}
 
     @property
     def request_ids(self) -> frozenset[str]:
-        return frozenset(self._page_tables)
+        return frozenset(self._allocations)
 
     @property
     def cached_pages(self) -> frozenset[int]:
@@ -62,7 +62,7 @@ class PageAllocator:
     @property
     def stats(self) -> PageAllocatorStats:
         allocated = self.num_pages - len(self._free_pages)
-        reserved = sum(self._reserved_page_counts.values())
+        reserved = sum(allocation.reserved_pages for allocation in self._allocations.values())
         return PageAllocatorStats(
             total_pages=self.num_pages,
             page_size=self.page_size,
@@ -70,7 +70,7 @@ class PageAllocator:
             allocated_pages=allocated,
             reserved_pages=reserved,
             admission_available_pages=self.num_pages - reserved,
-            request_count=len(self._page_tables),
+            request_count=len(self._allocations),
             cached_pages=len(self._cached_pages),
         )
 
@@ -109,20 +109,24 @@ class PageAllocator:
             raise ValueError("reserved_pages must cover the non-prefix request pages")
         if needed > self.stats.admission_available_pages:
             return False
-        self._page_tables[request_id] = list(prefix)
-        self._max_tokens[request_id] = max_tokens
-        self._reserved_page_counts[request_id] = needed
+        self._allocations[request_id] = _Allocation(
+            page_table=list(prefix),
+            max_tokens=max_tokens,
+            reserved_pages=needed,
+            shared_prefix_pages=len(prefix),
+        )
         return True
 
     def ensure_capacity(self, request_id: str, num_tokens: int) -> tuple[int, ...]:
         self._validate_known_request(request_id)
-        if num_tokens > self._max_tokens[request_id]:
+        allocation = self._allocations[request_id]
+        if num_tokens > allocation.max_tokens:
             raise PageAllocationError(
                 f"request {request_id!r} exceeds its token reservation: "
-                f"{num_tokens} > {self._max_tokens[request_id]}"
+                f"{num_tokens} > {allocation.max_tokens}"
             )
         needed = self.pages_for_tokens(num_tokens)
-        table = self._page_tables[request_id]
+        table = allocation.page_table
         additional = needed - len(table)
         if additional <= 0:
             return tuple(table)
@@ -136,18 +140,18 @@ class PageAllocator:
 
     def page_table(self, request_id: str) -> tuple[int, ...]:
         self._validate_known_request(request_id)
-        return tuple(self._page_tables[request_id])
+        return tuple(self._allocations[request_id].page_table)
 
     def max_tokens(self, request_id: str) -> int:
         self._validate_known_request(request_id)
-        return self._max_tokens[request_id]
+        return self._allocations[request_id].max_tokens
 
     def release(self, request_id: str) -> tuple[int, ...]:
         self._validate_known_request(request_id)
-        pages = tuple(self._page_tables.pop(request_id))
-        self._max_tokens.pop(request_id)
-        self._reserved_page_counts.pop(request_id)
-        still_referenced = {page for table in self._page_tables.values() for page in table}
+        pages = tuple(self._allocations.pop(request_id).page_table)
+        still_referenced = {
+            page for allocation in self._allocations.values() for page in allocation.page_table
+        }
         released = tuple(
             page
             for page in pages
@@ -172,12 +176,17 @@ class PageAllocator:
         prefix = tuple(prefix_pages)
         if any(page not in self._cached_pages for page in prefix):
             raise ValueError("replacement prefix pages must be cached")
-        table = self._page_tables[request_id]
+        allocation = self._allocations[request_id]
+        table = allocation.page_table
         if len(prefix) > len(table):
             raise ValueError("replacement prefix exceeds the request page table")
         displaced = tuple(table[: len(prefix)])
         table[: len(prefix)] = prefix
-        still_referenced = {page for current in self._page_tables.values() for page in current}
+        allocation.shared_prefix_pages = len(prefix)
+        allocation.reserved_pages = self.pages_for_tokens(allocation.max_tokens) - len(prefix)
+        still_referenced = {
+            page for allocation in self._allocations.values() for page in allocation.page_table
+        }
         released = tuple(
             page
             for page in displaced
@@ -190,14 +199,16 @@ class PageAllocator:
         evicted = set(pages)
         if not evicted <= self._cached_pages:
             raise ValueError("cannot evict pages that are not prefix-cached")
-        referenced = {page for table in self._page_tables.values() for page in table}
+        referenced = {
+            page for allocation in self._allocations.values() for page in allocation.page_table
+        }
         if evicted & referenced:
             raise RuntimeError("cannot evict a prefix page used by an active request")
         self._cached_pages.difference_update(evicted)
         self._free_pages.update(evicted)
 
     def check_integrity(self) -> None:
-        tables = list(self._page_tables.values())
+        tables = [allocation.page_table for allocation in self._allocations.values()]
         allocated = [page for table in tables for page in table]
         duplicate_pages = {page for page in set(allocated) if allocated.count(page) > 1}
         if duplicate_pages - self._cached_pages:
@@ -207,24 +218,29 @@ class PageAllocator:
             raise RuntimeError("physical page is both allocated and free")
         if owned | self._free_pages != set(range(self.num_pages)):
             raise RuntimeError("physical page accounting does not cover the pool")
-        if self._page_tables.keys() != self._max_tokens.keys():
-            raise RuntimeError("page tables and max-token reservations disagree")
-        if self._page_tables.keys() != self._reserved_page_counts.keys():
-            raise RuntimeError("page tables and page reservations disagree")
-        if sum(self._reserved_page_counts.values()) > self.num_pages:
+        reserved_pages = sum(allocation.reserved_pages for allocation in self._allocations.values())
+        if reserved_pages > self.num_pages:
             raise RuntimeError("reserved pages exceed physical pool capacity")
-        for request_id, table in self._page_tables.items():
-            if len(table) > self.pages_for_tokens(self._max_tokens[request_id]):
+        for allocation in self._allocations.values():
+            total_pages = self.pages_for_tokens(allocation.max_tokens)
+            if len(allocation.page_table) > total_pages:
                 raise RuntimeError("allocated pages exceed request maximum length")
+            if not 0 <= allocation.shared_prefix_pages <= len(allocation.page_table):
+                raise RuntimeError("shared prefix exceeds the request page table")
+            if allocation.reserved_pages != total_pages - allocation.shared_prefix_pages:
+                raise RuntimeError("request reservation disagrees with its shared prefix")
+            shared_prefix = allocation.page_table[: allocation.shared_prefix_pages]
+            if any(page not in self._cached_pages for page in shared_prefix):
+                raise RuntimeError("request shared prefix contains a non-cached page")
 
     def _validate_new_request_id(self, request_id: str) -> None:
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request_id must not be empty")
-        if request_id in self._page_tables:
+        if request_id in self._allocations:
             raise ValueError(f"request already has a page reservation: {request_id}")
 
     def _validate_known_request(self, request_id: str) -> None:
-        if request_id not in self._page_tables:
+        if request_id not in self._allocations:
             raise KeyError(f"unknown paged-cache request: {request_id}")
 
 
