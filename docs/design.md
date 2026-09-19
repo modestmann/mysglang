@@ -140,9 +140,9 @@ KV address    = pool[layer, 1, 2]
 | `TorchAttentionBackend` | Python 写页，再 gather/pad 成 dense tensor，调用 PyTorch SDPA | CPU 测试与 correctness oracle |
 | `FlashAttentionBackend` | `flash_attn_with_kvcache` 直接读取物理 pool 和 block table，并在同一 kernel 中追加 K/V | CUDA Prefill/Decode |
 
-`PagedKVCache.prepare_append()` 负责一次 append 的公共验证并生成 `cache_seqlens`、block table 与物理 pool view。Torch oracle 通过 `stage_append()` 写页并 gather；FA2 kernel 则直接写物理 pool。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
+模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成这一轮所有层共享的 request IDs、追加范围、`cache_seqlens` 和 block table。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。Torch oracle 通过 `stage_append()` 写页并 gather；FA2 kernel 则直接写物理 pool。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。当前 metadata 仍按层从 Python 构造；后续应把同一 forward 共用的 block table/lengths 提升为 batch metadata，避免重复创建。
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。`PagedKVBatch` 已允许各层复用 metadata，但当前模型输入仍是 dense `[batch, sequence]`，所以一轮中新追加的 chunk 必须等长；变长历史 KV 不受这个限制。真正的 ragged Prefill 需要 flattened tokens、累计长度和支持 paged append 的对应 kernel，不能用 padding 冒充。
 
 ## 5. Radix prefix cache
 

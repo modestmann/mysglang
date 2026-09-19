@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mysglang.cache import PagedKVCache
+from mysglang.cache import PagedKVBatch, PagedKVCache
 from mysglang.config import ModelConfig
 
 from .attention import AttentionBackend, TorchAttentionBackend
@@ -86,7 +86,7 @@ class CausalSelfAttention(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         kv_cache: PagedKVCache | None,
-        cache_request_ids: tuple[str, ...] | None,
+        cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
 
@@ -103,7 +103,7 @@ class CausalSelfAttention(nn.Module):
             value,
             layer_idx=self.layer_idx,
             kv_cache=kv_cache,
-            request_ids=cache_request_ids,
+            cache_batch=cache_batch,
         )
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(output)
@@ -138,13 +138,13 @@ class DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         kv_cache: PagedKVCache | None,
-        cache_request_ids: tuple[str, ...] | None,
+        cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
         x = x + self.self_attn(
             self.input_layernorm(x),
             positions,
             kv_cache,
-            cache_request_ids,
+            cache_batch,
         )
         return x + self.mlp(self.post_attention_layernorm(x))
 
@@ -185,6 +185,7 @@ class TinyCausalLM(nn.Module):
             raise ValueError("input_ids must have shape [batch, sequence]")
         if input_ids.size(1) == 0:
             raise ValueError("input_ids sequence must not be empty")
+        cache_batch = None
         if kv_cache is None:
             if cache_request_ids is not None:
                 raise ValueError("cache selectors require a KV cache")
@@ -195,10 +196,10 @@ class TinyCausalLM(nn.Module):
                 raise ValueError("cache_request_ids are required with PagedKVCache")
             if len(cache_request_ids) != input_ids.size(0):
                 raise ValueError("cache_request_ids length must match input batch size")
-            past_lengths = kv_cache.lengths(cache_request_ids)
-            total_lengths = tuple(length + input_ids.size(1) for length in past_lengths)
-            max_total_length = max(total_lengths)
-            starts = torch.tensor(past_lengths, device=input_ids.device)[:, None]
+            append_lengths = (input_ids.size(1),) * input_ids.size(0)
+            cache_batch = kv_cache.prepare_batch(cache_request_ids, append_lengths)
+            max_total_length = max(cache_batch.ends)
+            starts = cache_batch.cache_seqlens.to(dtype=torch.long)[:, None]
             offsets = torch.arange(input_ids.size(1), device=input_ids.device)[None, :]
             positions = starts + offsets
         else:
@@ -213,6 +214,6 @@ class TinyCausalLM(nn.Module):
                 hidden_states,
                 positions,
                 kv_cache,
-                cache_request_ids,
+                cache_batch,
             )
         return self.lm_head(self.norm(hidden_states)).float()

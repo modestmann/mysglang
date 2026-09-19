@@ -1,5 +1,6 @@
 import random
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -59,6 +60,49 @@ class PagedKVCacheTest(unittest.TestCase):
             dtype=parameter.dtype,
             device=parameter.device,
         )
+
+    @torch.inference_mode()
+    def test_batch_metadata_is_built_once_and_shared_across_layers(self) -> None:
+        self.assertTrue(self.cache.reserve_request("shared-metadata", 8))
+        self.cache.ensure_capacity("shared-metadata", 3)
+
+        with (
+            patch.object(
+                self.cache,
+                "prepare_batch",
+                wraps=self.cache.prepare_batch,
+            ) as prepare_batch,
+            patch.object(
+                self.cache,
+                "prepare_append",
+                wraps=self.cache.prepare_append,
+            ) as prepare_append,
+        ):
+            self.model(
+                torch.tensor([[1, 2, 3]]),
+                kv_cache=self.cache,
+                cache_request_ids=("shared-metadata",),
+            )
+
+        self.assertEqual(prepare_batch.call_count, 1)
+        self.assertEqual(prepare_append.call_count, self.model.config.num_layers)
+        layer_batches = [call.args[3] for call in prepare_append.call_args_list]
+        self.assertTrue(all(batch is layer_batches[0] for batch in layer_batches))
+        self.assertEqual(self.cache.lengths(("shared-metadata",)), (3,))
+
+    @torch.inference_mode()
+    def test_direct_append_remains_usable_one_layer_at_a_time(self) -> None:
+        self.assertTrue(self.cache.reserve_request("direct", 4))
+        self.cache.ensure_capacity("direct", 1)
+        shape = (1, self.model.config.num_key_value_heads, 1, self.model.config.head_dim)
+        key = torch.randn(shape)
+        value = torch.randn(shape)
+
+        for layer_idx in range(self.model.config.num_layers):
+            self.cache.append(layer_idx, key, value, ("direct",))
+
+        self.assertEqual(self.cache.lengths(("direct",)), (1,))
+        self.cache.check_integrity()
 
     @torch.inference_mode()
     def test_variable_length_requests_decode_in_one_batch(self) -> None:

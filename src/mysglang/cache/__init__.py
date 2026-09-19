@@ -5,6 +5,7 @@ from .paged import (
     PageAllocator,
     PageAllocatorStats,
     PagedKVAppendPlan,
+    PagedKVBatch,
     PagedKVCache,
 )
 from .radix import (
@@ -19,6 +20,7 @@ __all__ = [
     "PageAllocator",
     "PageAllocatorStats",
     "PagedKVAppendPlan",
+    "PagedKVBatch",
     "PagedKVCache",
     "RadixCacheHandle",
     "RadixCacheStats",

@@ -7,9 +7,10 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - 共享 Paged KV Cache、容量预留和 OOM-safe admission；
 - page-aligned Radix prefix cache、引用保护与按需淘汰；
 - 可切换的 PyTorch reference / FlashAttention 2 attention backend；
+- 一次 forward 构造、所有 Transformer 层复用的 Paged KV batch metadata；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
 
-项目目前仍以 tiny dense Qwen3 和 PyTorch reference attention 验证调度、缓存与模型语义，不是完整的生产推理框架。下一阶段才会接入真实模型、GPU attention backend 和正式评测。
+项目目前仍以 tiny dense Qwen3 和 PyTorch reference attention 验证调度、缓存与模型语义，并用可选 FlashAttention 2 后端验证 GPU paged-KV 路径，不是完整的生产推理框架。下一阶段将继续完成 ragged Prefill，再接入真实模型和正式评测。
 
 ## 当前主调用链
 

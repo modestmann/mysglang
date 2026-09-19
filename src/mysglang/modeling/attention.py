@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn.functional as F
 
-from mysglang.cache import PagedKVCache
+from mysglang.cache import PagedKVBatch, PagedKVCache
 
 
 class AttentionBackend(ABC):
@@ -25,7 +25,7 @@ class AttentionBackend(ABC):
         *,
         layer_idx: int,
         kv_cache: PagedKVCache | None,
-        request_ids: tuple[str, ...] | None,
+        cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
         """Return attention output in [batch, heads, sequence, head_dim] layout."""
 
@@ -43,18 +43,18 @@ class TorchAttentionBackend(AttentionBackend):
         *,
         layer_idx: int,
         kv_cache: PagedKVCache | None,
-        request_ids: tuple[str, ...] | None,
+        cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
         attention_mask = None
         plan = None
         if kv_cache is not None:
-            if request_ids is None:
-                raise ValueError("request_ids are required with PagedKVCache")
+            if cache_batch is None:
+                raise ValueError("cache_batch is required with PagedKVCache")
             plan = kv_cache.prepare_append(
                 layer_idx,
                 key,
                 value,
-                request_ids,
+                cache_batch,
             )
             key, value, attention_mask = kv_cache.stage_append(plan, key, value)
 
@@ -102,7 +102,7 @@ class FlashAttentionBackend(AttentionBackend):
         *,
         layer_idx: int,
         kv_cache: PagedKVCache | None,
-        request_ids: tuple[str, ...] | None,
+        cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
         self._validate_inputs(query, key, value)
         query_fa = query.transpose(1, 2)
@@ -117,18 +117,18 @@ class FlashAttentionBackend(AttentionBackend):
                 causal=True,
             )
         else:
-            if request_ids is None:
-                raise ValueError("request_ids are required with PagedKVCache")
+            if cache_batch is None:
+                raise ValueError("cache_batch is required with PagedKVCache")
             self.validate_cache(kv_cache)
-            plan = kv_cache.prepare_append(layer_idx, key, value, request_ids)
+            plan = kv_cache.prepare_append(layer_idx, key, value, cache_batch)
             output = self._flash_attn_with_kvcache(
                 query_fa,
                 plan.key_cache,
                 plan.value_cache,
                 k=key_fa,
                 v=value_fa,
-                cache_seqlens=plan.cache_seqlens,
-                block_table=plan.block_table,
+                cache_seqlens=cache_batch.cache_seqlens,
+                block_table=cache_batch.block_table,
                 causal=True,
             )
             kv_cache.commit_append(plan)
