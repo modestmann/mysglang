@@ -66,6 +66,13 @@ class RequestLifecycleTest(unittest.TestCase):
         self.assertEqual(request.prompt_token_ids, (1, 2))
         self.assertEqual(request.output_token_ids, ())
 
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            SamplingParams(max_new_tokens=1, temperature=-0.1)
+        with self.assertRaisesRegex(ValueError, "top_p"):
+            SamplingParams(max_new_tokens=1, top_p=0)
+        with self.assertRaisesRegex(ValueError, "top_k"):
+            SamplingParams(max_new_tokens=1, top_k=-1)
+
 
 if __name__ == "__main__":
     unittest.main()

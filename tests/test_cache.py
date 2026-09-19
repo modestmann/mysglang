@@ -51,6 +51,66 @@ class PageAllocatorTest(unittest.TestCase):
 
 class PagedKVCacheTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_decode_metadata_buffer_keeps_addresses_and_commits_once(self) -> None:
+        for request_id, prompt in (("a", [1, 2, 3]), ("b", [4])):
+            self.assertTrue(self.cache.reserve_request(request_id, 8))
+            self.cache.ensure_capacity(request_id, len(prompt))
+            self.model(
+                torch.tensor([prompt]),
+                kv_cache=self.cache,
+                cache_request_ids=(request_id,),
+            )
+
+        buffer = self.cache.allocate_decode_buffer(2, max_blocks=4)
+        pointers = tuple(
+            tensor.data_ptr()
+            for tensor in (
+                buffer.block_table,
+                buffer.cache_seqlens,
+                buffer.cu_seqlens_q,
+                buffer.cu_seqlens_k,
+                buffer.positions,
+                buffer.slot_mapping,
+            )
+        )
+        self.cache.ensure_capacity("a", 4)
+        self.cache.ensure_capacity("b", 2)
+        batch = self.cache.prepare_decode_batch(
+            ("a", "b"),
+            buffer,
+            commit_lengths=False,
+        )
+        self.model.forward_prepared(
+            torch.tensor([[6], [7]]),
+            kv_cache=self.cache,
+            cache_batch=batch,
+        )
+        self.assertEqual(self.cache.lengths(("a", "b")), (3, 1))
+        self.cache.commit_batch(batch)
+        self.assertEqual(self.cache.lengths(("a", "b")), (4, 2))
+
+        self.cache.ensure_capacity("a", 5)
+        self.cache.ensure_capacity("b", 3)
+        reused = self.cache.prepare_decode_batch(("b", "a"), buffer)
+        self.assertEqual(reused.starts, (2, 4))
+        self.assertEqual(
+            pointers,
+            tuple(
+                tensor.data_ptr()
+                for tensor in (
+                    buffer.block_table,
+                    buffer.cache_seqlens,
+                    buffer.cu_seqlens_q,
+                    buffer.cu_seqlens_k,
+                    buffer.positions,
+                    buffer.slot_mapping,
+                )
+            ),
+        )
+        self.assertTrue(torch.all(buffer.block_table[:, 3] == -1))
+        self.cache.check_integrity()
+
+    @torch.inference_mode()
     def test_selected_logits_skip_head_but_preserve_all_kv(self) -> None:
         self.cache.reserve_request("a", 8)
         self.cache.reserve_request("b", 8)

@@ -59,7 +59,8 @@ class TorchAttentionBackend(AttentionBackend):
             if query.ndim == 3:
                 keys, values = kv_cache.stage_packed_append(plan, key, value)
                 output = self._packed_attention(query, keys, values, cache_batch)
-                kv_cache.commit_append(plan)
+                if cache_batch.commit_lengths:
+                    kv_cache.commit_append(plan)
                 return output
             key, value, attention_mask = kv_cache.stage_append(plan, key, value)
 
@@ -73,7 +74,7 @@ class TorchAttentionBackend(AttentionBackend):
             attn_mask=attention_mask,
             is_causal=kv_cache is None,
         )
-        if plan is not None:
+        if plan is not None and cache_batch.commit_lengths:
             kv_cache.commit_append(plan)
         return output
 
@@ -196,7 +197,8 @@ class FlashAttentionBackend(AttentionBackend):
                     block_table=cache_batch.block_table,
                     causal=True,
                 )
-            kv_cache.commit_append(plan)
+            if cache_batch.commit_lengths:
+                kv_cache.commit_append(plan)
 
         return output if packed else output.transpose(1, 2)
 

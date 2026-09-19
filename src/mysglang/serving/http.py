@@ -24,6 +24,10 @@ class GenerateRequest(BaseModel):
     stream: bool = False
     eos_token_id: int | None = Field(default=None, ge=0)
     ignore_eos: bool = False
+    temperature: float = Field(default=0.0, ge=0)
+    top_k: int = Field(default=0, ge=0)
+    top_p: float = Field(default=1.0, gt=0, le=1)
+    seed: int | None = Field(default=None, ge=0)
 
 
 class ChatMessage(BaseModel):
@@ -32,12 +36,17 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "mysglang-tiny"
+    model: str = "qwen3"
     messages: list[ChatMessage]
     max_tokens: int = Field(default=16, gt=0)
     stream: bool = False
     eos_token_id: int | None = Field(default=None, ge=0)
     ignore_eos: bool = False
+    enable_thinking: bool = True
+    temperature: float = Field(default=0.0, ge=0)
+    top_k: int = Field(default=0, ge=0)
+    top_p: float = Field(default=1.0, gt=0, le=1)
+    seed: int | None = Field(default=None, ge=0)
 
 
 def _finish_reason(reason: FinishReason | None) -> str | None:
@@ -103,6 +112,10 @@ def create_app(service: GenerationService) -> FastAPI:
         max_tokens: int,
         eos_token_id: int | None,
         ignore_eos: bool,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        seed: int | None,
     ) -> GenerationSession:
         try:
             return service.start(
@@ -110,6 +123,10 @@ def create_app(service: GenerationService) -> FastAPI:
                 max_new_tokens=max_tokens,
                 eos_token_id=eos_token_id,
                 ignore_eos=ignore_eos,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                seed=seed,
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -126,6 +143,10 @@ def create_app(service: GenerationService) -> FastAPI:
             payload.max_tokens,
             payload.eos_token_id,
             payload.ignore_eos,
+            payload.temperature,
+            payload.top_k,
+            payload.top_p,
+            payload.seed,
         )
         if payload.stream:
             return StreamingResponse(
@@ -157,14 +178,20 @@ def create_app(service: GenerationService) -> FastAPI:
     async def chat_completions(payload: ChatCompletionRequest, request: HTTPRequest):
         if not payload.messages:
             raise HTTPException(status_code=400, detail="messages must not be empty")
-        prompt = " | ".join(f"{message.role}: {message.content}" for message in payload.messages)
-        prompt += " | assistant: "
-        session = start_session(
-            prompt,
-            payload.max_tokens,
-            payload.eos_token_id,
-            payload.ignore_eos,
-        )
+        try:
+            session = service.start_chat(
+                [message.model_dump() for message in payload.messages],
+                max_new_tokens=payload.max_tokens,
+                eos_token_id=payload.eos_token_id,
+                ignore_eos=payload.ignore_eos,
+                enable_thinking=payload.enable_thinking,
+                temperature=payload.temperature,
+                top_k=payload.top_k,
+                top_p=payload.top_p,
+                seed=payload.seed,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if payload.stream:
             return StreamingResponse(
                 _sse(

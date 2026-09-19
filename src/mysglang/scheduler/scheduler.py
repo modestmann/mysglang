@@ -5,11 +5,13 @@ from dataclasses import dataclass
 
 import torch
 
-from mysglang.cache import RadixPagedKVCache
+from mysglang.cache import PagedKVDecodeBuffer, RadixPagedKVCache
 from mysglang.core import IncrementalOutput, Request, RequestState
-from mysglang.modeling.tiny import TinyCausalLM
+from mysglang.modeling.cuda_graph import DecodeCudaGraphRunner
+from mysglang.modeling.qwen3 import Qwen3ForCausalLM
 
 from .config import SchedulerConfig
+from .sampler import sample_token
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,8 @@ class SchedulerStats:
     max_decode_batch_size: int
     max_wait_steps: int
     prefill_input_tokens: int
+    cuda_graph_captures: int
+    cuda_graph_replays: int
 
 
 @dataclass
@@ -56,7 +60,7 @@ class Scheduler:
     cache. There is deliberately no selectable legacy backend anymore.
     """
 
-    def __init__(self, model: TinyCausalLM, config: SchedulerConfig) -> None:
+    def __init__(self, model: Qwen3ForCausalLM, config: SchedulerConfig) -> None:
         self.model = model.eval()
         self.config = config
         parameter = next(model.parameters())
@@ -69,11 +73,27 @@ class Scheduler:
         )
         self.model.validate_cache(self.cache)
         self._device = parameter.device
+        self._decode_max_blocks = min(
+            self.cache.num_pages,
+            self.cache.allocator.pages_for_tokens(model.config.max_position_embeddings),
+        )
+        self._decode_buffers: dict[int, PagedKVDecodeBuffer] = {}
+        self._cuda_graph_runner = (
+            DecodeCudaGraphRunner(
+                self.model,
+                self.cache,
+                config.decode_cuda_graph_batch_sizes,
+                max_blocks=self._decode_max_blocks,
+            )
+            if config.decode_cuda_graph_batch_sizes
+            else None
+        )
         self._waiting: deque[_Entry] = deque()
         self._prefilling: dict[str, _Entry] = {}
         self._running: dict[str, _Entry] = {}
         # 所有未结束请求的总索引：waiting + prefilling + running。
         self._entries: dict[str, _Entry] = {}
+        self._sampling_generators: dict[str, torch.Generator] = {}
         self._step_index = 0
         self._max_active_requests = 0
         self._finished_requests = 0
@@ -95,6 +115,7 @@ class Scheduler:
 
     @property
     def stats(self) -> SchedulerStats:
+        graph_stats = self._cuda_graph_runner.stats if self._cuda_graph_runner else None
         return SchedulerStats(
             active_requests=len(self._entries),
             waiting_requests=len(self._waiting) + len(self._prefilling),
@@ -107,6 +128,8 @@ class Scheduler:
             max_decode_batch_size=self._max_decode_batch_size,
             max_wait_steps=self._max_wait_steps,
             prefill_input_tokens=self._prefill_input_tokens,
+            cuda_graph_captures=graph_stats.captures if graph_stats else 0,
+            cuda_graph_replays=graph_stats.replays if graph_stats else 0,
         )
 
     def validate(self, request: Request) -> None:
@@ -258,7 +281,7 @@ class Scheduler:
 
         outputs = []
         for index, entry in enumerate(decoding):
-            event = entry.request.record_token(int(logits[index].argmax().item()))
+            event = entry.request.record_token(self._sample(logits[index], entry.request))
             outputs.append(event)
             if event.finished:
                 self._running.pop(entry.request.request_id)
@@ -274,7 +297,7 @@ class Scheduler:
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
                 self.cache.publish_prefix(request_id, request.prompt_token_ids)
                 request.start_decode()
-                next_token = int(logits[logits_offset].argmax().item())
+                next_token = self._sample(logits[logits_offset], request)
                 logits_offset += 1
                 event = request.record_token(next_token)
                 outputs.append(event)
@@ -325,22 +348,43 @@ class Scheduler:
         lengths = self.cache.lengths(request_ids)
         for request_id, length in zip(request_ids, lengths):
             self.cache.ensure_capacity(request_id, length + 1)
-        input_ids = torch.tensor(
-            [[entry.request.last_output_token_id] for entry in entries],
-            dtype=torch.long,
-            device=self._device,
-        )
-        logits = self.model(
-            input_ids,
-            kv_cache=self.cache,
-            cache_request_ids=request_ids,
-        )
+        input_token_ids = tuple(entry.request.last_output_token_id for entry in entries)
+        graph_eligible = all(entry.request.sampling_params.is_greedy for entry in entries)
+        if (
+            graph_eligible
+            and self._cuda_graph_runner
+            and self._cuda_graph_runner.supports(len(entries))
+        ):
+            # 满足固定 Decode bucket 条件后，从这里进入 Graph replay。
+            next_token_ids = self._cuda_graph_runner.run(input_token_ids, request_ids)
+        else:
+            input_ids = torch.tensor(
+                input_token_ids,
+                dtype=torch.long,
+                device=self._device,
+            ).view(len(entries), 1)
+            buffer = self._decode_buffers.get(len(entries))
+            if buffer is None:
+                buffer = self.cache.allocate_decode_buffer(
+                    len(entries),
+                    max_blocks=self._decode_max_blocks,
+                )
+                self._decode_buffers[len(entries)] = buffer
+            batch = self.cache.prepare_decode_batch(request_ids, buffer)
+            logits = self.model.forward_prepared(
+                input_ids,
+                kv_cache=self.cache,
+                cache_batch=batch,
+            )
+            next_token_ids = tuple(
+                self._sample(logits[index, -1], entry.request)
+                for index, entry in enumerate(entries)
+            )
         self._model_forwards += 1
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(entries))
 
         outputs = []
-        for batch_index, entry in enumerate(entries):
-            next_token = int(logits[batch_index, -1].argmax().item())
+        for entry, next_token in zip(entries, next_token_ids):
             event = entry.request.record_token(next_token)
             outputs.append(event)
             if event.finished:
@@ -364,6 +408,7 @@ class Scheduler:
             else:
                 self.cache.release_request(request_id)
         self._entries.pop(request_id, None)
+        self._sampling_generators.pop(request_id, None)
         if finished:
             self._finished_requests += 1
         else:
@@ -372,3 +417,17 @@ class Scheduler:
     @staticmethod
     def _max_request_tokens(request: Request) -> int:
         return len(request.prompt_token_ids) + request.sampling_params.max_new_tokens
+
+    def _sample(self, logits: torch.Tensor, request: Request) -> int:
+        params = request.sampling_params
+        generator = None
+        if not params.is_greedy:
+            generator = self._sampling_generators.get(request.request_id)
+            if generator is None:
+                generator = torch.Generator(device=self._device)
+                if params.seed is None:
+                    generator.seed()
+                else:
+                    generator.manual_seed(params.seed)
+                self._sampling_generators[request.request_id] = generator
+        return sample_token(logits, params, generator=generator)

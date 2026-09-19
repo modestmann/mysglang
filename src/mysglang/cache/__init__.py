@@ -7,6 +7,7 @@ from .paged import (
     PagedKVAppendPlan,
     PagedKVBatch,
     PagedKVCache,
+    PagedKVDecodeBuffer,
 )
 from .radix import (
     RadixCacheHandle,
@@ -22,6 +23,7 @@ __all__ = [
     "PagedKVAppendPlan",
     "PagedKVBatch",
     "PagedKVCache",
+    "PagedKVDecodeBuffer",
     "RadixCacheHandle",
     "RadixCacheStats",
     "RadixPagedKVCache",

@@ -18,6 +18,7 @@ class ByteTokenizer:
     """A checkpoint-free tokenizer for testing HTTP and streaming mechanics."""
 
     vocab_size = 256
+    eos_token_id = None
 
     def encode(self, text: str) -> list[int]:
         if not isinstance(text, str) or not text:
@@ -30,6 +31,18 @@ class ByteTokenizer:
 
     def new_incremental_decoder(self) -> IncrementalUTF8Decoder:
         return IncrementalUTF8Decoder()
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        enable_thinking: bool = True,
+    ) -> list[int]:
+        del enable_thinking
+        if not messages:
+            raise ValueError("messages must not be empty")
+        prompt = " | ".join(f"{message['role']}: {message['content']}" for message in messages)
+        return self.encode(prompt + " | assistant: ")
 
     def _validate(self, token_ids: list[int]) -> None:
         if any(

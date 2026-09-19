@@ -14,7 +14,7 @@
 ```text
 HTTP / caller
   -> GenerationService.start
-       -> tokenizer.encode
+       -> tokenizer.encode / apply_chat_template
        -> Request(WAITING)
        -> Scheduler.validate
        -> 返回 GenerationSession
@@ -146,9 +146,74 @@ KV address    = pool[layer, 1, 2]
 
 模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FA2 varlen kernel 再直接按 block table 读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。当前 metadata 和 slot mapping 仍在 Python 中逐 batch 构造，后续可通过复用 buffer 和固定 bucket 继续降低开销。
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。
 
-## 5. Radix prefix cache
+### Decode metadata buffer 与 CUDA Graph
+
+普通 eager Decode 每轮都会由 Python 发起 embedding、各层 linear/attention/MLP、norm、LM head 和 argmax 等许多 kernel。小 batch 时计算本身较短，CPU/Python/CUDA driver 逐个提交 kernel 的固定开销可能变得显眼。CUDA Graph 会先记录这一串 GPU 操作及其依赖，之后用一次 `replay()` 重新提交整张图；它减少的是 launch overhead，不减少模型计算，也不消除 attention kernel 对 block table 的读取。
+
+这里的 **eager** 是执行方式：Python 运行到一个 PyTorch CUDA 算子，dispatcher 就立即把对应 kernel 提交到 GPU；它不表示单请求、不使用 batching，也不是一种 Prefill/Decode 调度策略。调度和执行是两条独立的轴：Scheduler 可以先组成纯 Prefill、纯 Decode 或混合 batch，然后选择用 eager 执行；只有满足捕获条件的纯 Decode batch 才改用 Graph replay。因此“MoE 动态 expert dispatch 走 eager”只表示每轮根据本次 router 结果正常执行算子，不表示 MoE 请求不能与其他请求组成 batch。
+
+| 维度 | 决定的问题 | 当前选择 |
+|---|---|---|
+| 调度策略 | 本轮把哪些请求和哪些 Prefill/Decode token 放在一起 | continuous batching、chunked Prefill、允许 mixed batch |
+| 执行方式 | 选好的 batch 如何向 GPU 提交算子 | eager，或满足条件时 CUDA Graph replay |
+
+传统 CUDA Graph 要求捕获期间的算子序列、控制流，以及相关 tensor 的 shape、stride/layout 和显存地址保持一致；tensor 中的数值可以改变。限制不只针对 Q，而是覆盖 input、Q/K/V、中间激活、logits、block table 等整条捕获路径。纯 Decode 固定 `S=1`，按精确 `B` 建 bucket 后，Q 为固定的 `[B, heads, 1, head_dim]`；历史长度只是 `cache_seqlens` 中变化的数值，KV pool 和 block table buffer 的外形、地址仍固定。Prefill 的 packed token 总数 `T` 经常变化，会带动 Q 和所有中间激活变形；技术上可以为固定 `T` 建 bucket 或 padding，但当前收益较低且浪费较多，所以仍走 eager。MoE 每轮的 expert 选择和各 expert token 数又是数据依赖的动态形状，当前也不捕获 Graph。
+
+Graph 要求 tensor 的形状和地址保持稳定，但每轮的 token、sequence length、页表内容和 request 顺序都会改变。因此纯 Decode 为每个精确 batch-size bucket 持有一套固定地址的 buffer：
+
+```text
+static input_ids [B, 1]
+static block_table [B, max_blocks]
+static cache_seqlens / positions / slot_mapping / cu_seqlens
+```
+
+每轮仍由 Scheduler 选择请求，并在 Graph 外把新值原地写入这些 buffer；replay 中的 FA2 kernel 会从相同地址读取本轮的新内容。地址不变不等于值不变。`Qwen3ForCausalLM.forward_prepared()` 让 eager 和 Graph 共用已经准备好的 `PagedKVBatch`，避免模型内部重新分配 metadata。未配置 Graph 的纯 Decode 也按 batch size 复用这套 metadata buffer。
+
+当前只捕获配置 `decode_cuda_graph_batch_sizes=(...)` 中的精确大小。例如只配置 `(2, 4)` 时，batch 2/4 走 Graph，batch 1/3 走 eager；不会向较大 bucket 填 dummy request，因为 dummy token 还会牵涉页表、KV 写入和采样语义。某个 bucket 第一次命中时先 warmup/capture，后续才摊薄这次成本，所以 bucket 应由 workload 命中率决定，而不是越多越好。
+
+Graph replay 不会再次执行 capture 时的 Python。各层 backend 因此在 Graph 内只写物理 KV，不推进 Python 维护的逻辑长度；输出 token 同步成功后，`commit_batch()` 才一次性提交所有层长度。若 kernel 失败，逻辑长度仍停在旧值。混合 Prefill/Decode 的 token 数和分段形状经常变化，当前继续使用 packed eager 路径，不进入 Decode Graph。
+
+## 5. 真实 Qwen3、MoE 与 tokenizer
+
+`Qwen3ForCausalLM` 同时承载 dense Qwen3 和 Qwen3MoE。配置显式保存 `head_dim`，不能再假设它等于 `hidden_size / num_attention_heads`：本地 Qwen3-0.6B 的 hidden size 是 1024，但 16 个 query heads 的 head dimension 是 128，因此 Q projection 实际宽度为 2048。
+
+运行时权重布局为：
+
+```text
+qkv_proj      [q_heads * head_dim + 2 * kv_heads * head_dim, hidden]
+gate_up_proj  [2 * intermediate, hidden]
+o_proj        [hidden, q_heads * head_dim]
+down_proj     [hidden, intermediate]
+```
+
+SafeTensors loader 在 meta device 上建立模型，再用最终 dtype/device 一次分配存储，逐 tensor 复制权重，避免先构造完整 FP32 模型。Hugging Face checkpoint 中分离的 `q_proj/k_proj/v_proj` 和 `gate_proj/up_proj` 会写入 fused parameter 的不同切片；单文件和 index 分片 checkpoint 都使用同一条路径。fused QKV/gate-up 是未来 column parallel 的边界，o/down projection 是 row parallel 的边界，但当前尚未实现 rank、NCCL collective 或 distributed page-table 同步。
+
+MoE layer 根据 `decoder_sparse_step` 和 `mlp_only_layers` 选择 dense MLP 或 sparse block。Sparse block 执行：
+
+```text
+router linear -> fp32 softmax -> top-k experts
+              -> optional top-k renormalization
+              -> expert SwiGLU
+              -> routing-weighted index_add
+```
+
+expert 参数按 `[num_experts, ...]` 保存，loader 同时接受新版 packed expert tensor 和旧版逐 expert gate/up/down tensor。当前逐 expert loop 以正确性和可读性为主，真实大 MoE 应在云端用 grouped GEMM/Triton 替换。数据依赖的动态 expert dispatch 尚未加入 CUDA Graph，因此配置 MoE Graph bucket 会被明确拒绝。
+
+`HuggingFaceTokenizer` 离线加载 checkpoint tokenizer；chat endpoint 直接调用模型自带的 `apply_chat_template()`，支持 Qwen3 `enable_thinking`，不再手写 role 字符串。增量 decoder 保存生成 token 上下文，只发送稳定、可打印的新后缀，避免单个 token 的 UTF-8 byte fragment 产生乱码。
+
+### 流式 detokenization 的稳定前缀
+
+流式输出的单位实际是 token，不是汉字或字母。当前采用保守规则：完整的 CJK 字符通常可以立即提交；末尾尚无空格的 Latin 子词或不完整 UTF-8 byte fragment 先留在 decoder 中，遇到空格、换行、后续稳定字符或生成结束时再输出。这不是“英文在原理上不能逐字母输出”，而是避免 tokenizer 的后续 token 改写尚不稳定的文本尾部。
+
+decoder 每次重新解码累计 token，并维护已经发送的稳定前缀 `sent_text`。完整解码结果必须仍以 `sent_text` 开头，而且本轮候选前缀绝不能比它更短。例如 `我是 -> 我是AI` 时可以暂存 `AI`，但不能撤回已经发送的 `我是`；最终所有增量片段拼接后必须严格等于一次性完整解码结果。这个不变量由 tokenizer 回归测试覆盖。
+
+Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。
+
+本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers。真实 MoE checkpoint 留待具备足够显存的云端环境验证。
+
+## 6. Radix prefix cache
 
 Radix Tree 只保存索引关系：
 
@@ -200,7 +265,7 @@ align_down(len(prompt) - 1, page_size)
 
 第三种方案仍需让该 token 依次经过所有 Transformer layers，因为后一层的 Q 依赖前一层 hidden state；在 fused QKV 模型中也未必能廉价地只算 Q。若还要共享可继续写入的部分页，则必须增加 copy-on-write。它们是工程权衡，不是当前 KV 正确性的缺陷。
 
-## 6. 与 Mini-SGLang 的关系
+## 7. 与 Mini-SGLang 的关系
 
 以下比较固定基于本地 `/home/sheep/mini-sglang` 快照 `9a91cfa`，不代表其未来版本。
 
@@ -213,20 +278,20 @@ align_down(len(prompt) - 1, page_size)
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | tiny model 与 gather/pad reference attention |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | 真实 dense Qwen3、可读 MoE、FA2 paged attention 与精确 Decode Graph；尚无 TP/grouped GEMM |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
-## 7. 当前限制
+## 8. 当前限制
 
-- 模型是随机 tiny dense Qwen3，没有真实 tokenizer、checkpoint 或 MoE；
-- sampling 只有 greedy；
+- 本地只有 dense Qwen3-0.6B checkpoint；真实 MoE checkpoint 尚待云端验证；
+- MoE 使用逐 expert loop，尚无 grouped GEMM、expert parallel 或负载均衡性能优化；
 - 单进程同步 worker，没有 scheduler/forward overlap；
-- ragged Prefill 已打通，但 metadata/slot mapping 仍由 Python 构造，尚未做运行时性能调优；
+- 纯 Decode metadata 已复用；ragged/mixed metadata 与 slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
-- 没有 CUDA Graph、Tensor Parallel 和生产容错；
+- CUDA Graph 目前只覆盖 dense、greedy、精确纯 Decode bucket；没有 Tensor Parallel 和生产容错；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。

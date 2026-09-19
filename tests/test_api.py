@@ -132,7 +132,7 @@ class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
         chat = await self.client.post(
             "/v1/chat/completions",
             json={
-                "model": "mysglang-tiny",
+                "model": "qwen3",
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_tokens": 3,
             },

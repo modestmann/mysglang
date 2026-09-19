@@ -41,6 +41,7 @@ class PagedKVBatch:
     positions: torch.Tensor
     slot_mapping: torch.Tensor
     _owner_token: object = field(repr=False, compare=False)
+    commit_lengths: bool = True
 
     @property
     def batch_size(self) -> int:
@@ -74,6 +75,27 @@ class PagedKVAppendPlan:
     batch: PagedKVBatch
     key_cache: torch.Tensor
     value_cache: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PagedKVDecodeBuffer:
+    """Fixed-address device metadata reused by one exact Decode batch size."""
+
+    block_table: torch.Tensor
+    cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    positions: torch.Tensor
+    slot_mapping: torch.Tensor
+    _owner_token: object = field(repr=False, compare=False)
+
+    @property
+    def batch_size(self) -> int:
+        return self.cache_seqlens.numel()
+
+    @property
+    def max_blocks(self) -> int:
+        return self.block_table.size(1)
 
 
 @dataclass
@@ -446,6 +468,99 @@ class PagedKVCache:
         self._validate_batch_inputs(requests, lengths)
         return self._build_batch(requests, lengths, self.lengths(requests))
 
+    def allocate_decode_buffer(
+        self,
+        batch_size: int,
+        *,
+        max_blocks: int,
+    ) -> PagedKVDecodeBuffer:
+        """Allocate stable Decode metadata addresses for one exact batch size."""
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if not isinstance(max_blocks, int) or isinstance(max_blocks, bool) or max_blocks <= 0:
+            raise ValueError("max_blocks must be a positive integer")
+        if max_blocks > self.num_pages:
+            raise ValueError("max_blocks cannot exceed the physical page count")
+        device = self._keys.device
+        return PagedKVDecodeBuffer(
+            block_table=torch.full(
+                (batch_size, max_blocks),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            ),
+            cache_seqlens=torch.empty(batch_size, dtype=torch.int32, device=device),
+            cu_seqlens_q=torch.arange(
+                batch_size + 1,
+                dtype=torch.int32,
+                device=device,
+            ),
+            cu_seqlens_k=torch.empty(batch_size + 1, dtype=torch.int32, device=device),
+            positions=torch.empty(batch_size, dtype=torch.long, device=device),
+            slot_mapping=torch.empty(batch_size, dtype=torch.long, device=device),
+            _owner_token=self._batch_owner_token,
+        )
+
+    def prepare_decode_batch(
+        self,
+        request_ids: Sequence[str],
+        buffer: PagedKVDecodeBuffer,
+        *,
+        commit_lengths: bool = True,
+    ) -> PagedKVBatch:
+        """Fill fixed Decode metadata buffers without replacing their device tensors."""
+        requests = self._validate_requests(request_ids)
+        if buffer._owner_token is not self._batch_owner_token:
+            raise ValueError("paged KV decode buffer belongs to a different cache")
+        if len(requests) != buffer.batch_size:
+            raise ValueError("request batch size does not match the decode buffer")
+        if len(set(requests)) != len(requests):
+            raise ValueError("request_ids must be unique within a batch")
+
+        starts = self.lengths(requests)
+        ends = tuple(start + 1 for start in starts)
+        tables = tuple(self.allocator.page_table(request_id) for request_id in requests)
+        buffer.block_table.fill_(-1)
+        slots = []
+        cumulative_k = [0]
+        for batch_index, (request_id, start, end, table) in enumerate(
+            zip(requests, starts, ends, tables)
+        ):
+            if len(table) > buffer.max_blocks:
+                raise PageAllocationError(
+                    f"request {request_id!r} needs {len(table)} blocks but the Decode "
+                    f"buffer only has {buffer.max_blocks}"
+                )
+            if end > len(table) * self.page_size:
+                raise PageAllocationError(
+                    f"request {request_id!r} needs {end} token slots but only "
+                    f"{len(table) * self.page_size} were allocated"
+                )
+            buffer.block_table[batch_index, : len(table)].copy_(
+                torch.tensor(table, dtype=torch.int32)
+            )
+            slots.append(table[start // self.page_size] * self.page_size + start % self.page_size)
+            cumulative_k.append(cumulative_k[-1] + end)
+
+        buffer.cache_seqlens.copy_(torch.tensor(starts, dtype=torch.int32))
+        buffer.positions.copy_(torch.tensor(starts, dtype=torch.long))
+        buffer.slot_mapping.copy_(torch.tensor(slots, dtype=torch.long))
+        buffer.cu_seqlens_k.copy_(torch.tensor(cumulative_k, dtype=torch.int32))
+        return PagedKVBatch(
+            request_ids=requests,
+            starts=starts,
+            append_lengths=(1,) * len(requests),
+            ends=ends,
+            block_table=buffer.block_table,
+            cache_seqlens=buffer.cache_seqlens,
+            cu_seqlens_q=buffer.cu_seqlens_q,
+            cu_seqlens_k=buffer.cu_seqlens_k,
+            positions=buffer.positions,
+            slot_mapping=buffer.slot_mapping,
+            _owner_token=self._batch_owner_token,
+            commit_lengths=commit_lengths,
+        )
+
     def _build_batch(
         self,
         requests: tuple[str, ...],
@@ -667,6 +782,15 @@ class PagedKVCache:
             raise RuntimeError("paged KV append plan is stale")
         for request_id, end in zip(requests, plan.batch.ends):
             self._lengths[request_id][plan.layer_idx] = end
+
+    def commit_batch(self, batch: PagedKVBatch) -> None:
+        """Advance every layer after a captured Decode replay has completed."""
+        self._validate_batch(batch)
+        for layer_idx in range(self.num_layers):
+            if self.layer_lengths(layer_idx, batch.request_ids) != batch.starts:
+                raise RuntimeError("paged KV batch metadata is stale for this layer")
+        for request_id, end in zip(batch.request_ids, batch.ends):
+            self._lengths[request_id] = [end] * self.num_layers
 
     def release_request(self, request_id: str) -> tuple[int, ...]:
         self._validate_request(request_id)

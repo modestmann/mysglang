@@ -7,9 +7,9 @@ import torch
 from mysglang import (
     FlashAttentionBackend,
     ModelConfig,
+    Qwen3ForCausalLM,
     Scheduler,
     SchedulerConfig,
-    TinyCausalLM,
     TorchAttentionBackend,
 )
 from mysglang.cache import PagedKVCache
@@ -21,7 +21,7 @@ FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
 class AttentionBackendTest(unittest.TestCase):
     @unittest.skipUnless(FLASH_ATTN_AVAILABLE, "requires flash-attn")
     def test_flash_backend_rejects_incompatible_page_size_before_serving(self) -> None:
-        model = TinyCausalLM(
+        model = Qwen3ForCausalLM(
             ModelConfig(),
             attention_backend=FlashAttentionBackend(),
         )
@@ -46,7 +46,7 @@ class AttentionBackendTest(unittest.TestCase):
         )
         torch.manual_seed(2027)
         reference = (
-            TinyCausalLM(
+            Qwen3ForCausalLM(
                 config,
                 attention_backend=TorchAttentionBackend(),
             )
@@ -54,7 +54,7 @@ class AttentionBackendTest(unittest.TestCase):
             .half()
         )
         flash = (
-            TinyCausalLM(
+            Qwen3ForCausalLM(
                 config,
                 attention_backend=FlashAttentionBackend(),
             )
@@ -211,8 +211,50 @@ class AttentionBackendTest(unittest.TestCase):
         self.assertEqual(actual, expected)
         self.assertEqual(flash_ragged.stats.max_prefill_batch_size, 3)
 
+        graph_base = dict(
+            max_running_requests=2,
+            prefill_token_budget=512,
+            num_pages=4,
+            page_size=256,
+        )
+        reference_graph = Scheduler(reference, SchedulerConfig(**graph_base))
+        flash_graph = Scheduler(
+            flash,
+            SchedulerConfig(
+                **graph_base,
+                decode_cuda_graph_batch_sizes=(2,),
+            ),
+        )
+        graph_prompts = {
+            "graph-a": [index % config.vocab_size for index in range(255)],
+            "graph-b": [(index + 11) % config.vocab_size for index in range(250)],
+        }
+        for scheduler in (reference_graph, flash_graph):
+            for request_id, prompt in graph_prompts.items():
+                scheduler.add(make_request(request_id, prompt, max_new_tokens=3))
+        expected = drain_scheduler(reference_graph)
+        actual = drain_scheduler(flash_graph)
+        self.assertEqual(actual, expected)
+        self.assertEqual(flash_graph.stats.cuda_graph_captures, 1)
+        self.assertEqual(flash_graph.stats.cuda_graph_replays, 2)
+
+        # 同一个 bucket 换成全新的请求和长度，必须只改静态 buffer 的内容而不重捕获。
+        replacement_prompts = {
+            "graph-c": [31] * 20,
+            "graph-d": [47] * 30,
+        }
+        for scheduler in (reference_graph, flash_graph):
+            for request_id, prompt in replacement_prompts.items():
+                scheduler.add(make_request(request_id, prompt, max_new_tokens=2))
+        expected = drain_scheduler(reference_graph)
+        actual = drain_scheduler(flash_graph)
+        self.assertEqual(actual, expected)
+        self.assertEqual(flash_graph.stats.cuda_graph_captures, 1)
+        self.assertEqual(flash_graph.stats.cuda_graph_replays, 3)
+        flash_graph.check_integrity()
+
     @staticmethod
-    def _make_cache(model: TinyCausalLM, config: ModelConfig) -> PagedKVCache:
+    def _make_cache(model: Qwen3ForCausalLM, config: ModelConfig) -> PagedKVCache:
         parameter = next(model.parameters())
         return PagedKVCache.from_config(
             config,

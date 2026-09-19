@@ -11,25 +11,30 @@ from .core import (
 )
 from .modeling import (
     AttentionBackend,
+    CheckpointLoadReport,
     FlashAttentionBackend,
-    TinyCausalLM,
+    Qwen3ForCausalLM,
     TorchAttentionBackend,
+    load_huggingface_state_dict,
 )
 from .scheduler import Scheduler, SchedulerConfig, SchedulerStats, SchedulerStep
 from .serving import GenerationChunk, GenerationService, GenerationSession
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, HuggingFaceTokenizer
 
 __all__ = [
     "AttentionBackend",
     "ByteTokenizer",
+    "CheckpointLoadReport",
     "FinishReason",
     "FlashAttentionBackend",
     "GenerationChunk",
     "GenerationService",
     "GenerationSession",
+    "HuggingFaceTokenizer",
     "IncrementalOutput",
     "InvalidStateTransition",
     "ModelConfig",
+    "Qwen3ForCausalLM",
     "Request",
     "RequestState",
     "SamplingParams",
@@ -37,6 +42,6 @@ __all__ = [
     "SchedulerConfig",
     "SchedulerStats",
     "SchedulerStep",
-    "TinyCausalLM",
     "TorchAttentionBackend",
+    "load_huggingface_state_dict",
 ]

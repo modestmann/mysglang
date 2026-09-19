@@ -12,6 +12,8 @@ class SchedulerConfig:
     prefill_token_budget: int = 64
     num_pages: int = 64
     page_size: int = 4
+    # 只捕获这些精确 batch size；不补 dummy request，也不改变调度顺序。
+    decode_cuda_graph_batch_sizes: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -25,3 +27,14 @@ class SchedulerConfig:
                 raise TypeError(f"{name} must be an integer")
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        buckets = self.decode_cuda_graph_batch_sizes
+        if not isinstance(buckets, tuple):
+            raise TypeError("decode_cuda_graph_batch_sizes must be a tuple")
+        if any(
+            not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in buckets
+        ):
+            raise ValueError("CUDA Graph batch sizes must be positive integers")
+        if tuple(sorted(set(buckets))) != buckets:
+            raise ValueError("CUDA Graph batch sizes must be sorted and unique")
+        if buckets and buckets[-1] > self.max_running_requests:
+            raise ValueError("CUDA Graph batch size cannot exceed max_running_requests")

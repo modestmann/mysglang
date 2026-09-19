@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
-from mysglang import ModelConfig, Request, SamplingParams, TinyCausalLM
+from mysglang import ModelConfig, Qwen3ForCausalLM, Request, SamplingParams
 
 
 def make_model(
@@ -12,9 +12,9 @@ def make_model(
     seed: int = 2026,
     vocab_size: int = 64,
     max_position_embeddings: int = 64,
-) -> TinyCausalLM:
+) -> Qwen3ForCausalLM:
     torch.manual_seed(seed)
-    return TinyCausalLM(
+    return Qwen3ForCausalLM(
         ModelConfig(
             vocab_size=vocab_size,
             hidden_size=24,
@@ -41,7 +41,7 @@ def make_request(
 
 @torch.inference_mode()
 def reference_generate(
-    model: TinyCausalLM,
+    model: Qwen3ForCausalLM,
     prompt_token_ids: Iterable[int],
     max_new_tokens: int,
 ) -> list[int]:

@@ -25,15 +25,15 @@ class InvalidStateTransition(RuntimeError):
 
 @dataclass(frozen=True)
 class SamplingParams:
-    """Sampling options implemented by the current greedy path.
-
-    Temperature, top-k and top-p are intentionally absent until a real sampler
-    implements them, so callers cannot request behavior that would be ignored.
-    """
+    """Per-request generation limits and reproducible sampling options."""
 
     max_new_tokens: int
     eos_token_id: int | None = None
     ignore_eos: bool = False
+    temperature: float = 0.0
+    top_k: int = 0
+    top_p: float = 1.0
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.max_new_tokens, int) or isinstance(self.max_new_tokens, bool):
@@ -42,6 +42,27 @@ class SamplingParams:
             raise ValueError("max_new_tokens must be positive")
         if self.eos_token_id is not None:
             _validate_token_id(self.eos_token_id, name="eos_token_id")
+        if not isinstance(self.temperature, int | float) or isinstance(self.temperature, bool):
+            raise TypeError("temperature must be a number")
+        if self.temperature < 0:
+            raise ValueError("temperature must be non-negative")
+        if not isinstance(self.top_k, int) or isinstance(self.top_k, bool):
+            raise TypeError("top_k must be an integer")
+        if self.top_k < 0:
+            raise ValueError("top_k must be non-negative")
+        if not isinstance(self.top_p, int | float) or isinstance(self.top_p, bool):
+            raise TypeError("top_p must be a number")
+        if not 0 < self.top_p <= 1:
+            raise ValueError("top_p must be in (0, 1]")
+        if self.seed is not None:
+            if not isinstance(self.seed, int) or isinstance(self.seed, bool):
+                raise TypeError("seed must be an integer")
+            if self.seed < 0:
+                raise ValueError("seed must be non-negative")
+
+    @property
+    def is_greedy(self) -> bool:
+        return self.temperature == 0
 
 
 # 冻结字段：增量输出事件创建后不允许被消费者修改。

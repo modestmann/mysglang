@@ -33,20 +33,23 @@
 - 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FA2 paged-varlen kernel 直接读取历史页；
 - 已实现 Prefill/Decode 混合 forward：已有 Decode 每轮推进一个 token，Prefill 在独立 token budget 内打包；
 - 已按采样位置裁剪最终 hidden states，只为 Decode 和已完成 Prompt 的末尾 token 计算 logits；未完成 Prefill 仅更新 KV；
-- 下一步复用 metadata buffer，并为固定 Decode bucket 加入 CUDA Graph；
+- 已为纯 Decode 按精确 batch size 复用固定地址的 input/metadata buffer，并可选捕获 CUDA Graph；
+- 已验证同一个 Graph 在 request 顺序、sequence length 和 block table 更新后可重放，并覆盖跨页 Decode；
+- 下一步用正式 workload 测量不同 bucket 的命中率、capture 显存成本和 TPOT 收益，再决定默认 bucket；
 - GPU 不支持所选 kernel 时给出明确错误或显式回退。
 
 验收：reference 与 GPU backend 的 logits/token 在约定容差内一致；记录 TTFT、TPOT、吞吐、峰值显存、backend、dtype、shape 和 GPU 信息。
 
 ## 3. 真实 Qwen3 推理链
 
-- 接入 Hugging Face tokenizer、chat template 和增量 detokenization；
-- 实现 SafeTensors 权重加载及 fused QKV、gate/up 映射；
-- 先完成真实 dense Qwen3 对齐，再实现 tiny MoE router/top-k/expert dispatch；
-- 最后加载可用的 Qwen3 MoE checkpoint，并逐步替换简单 expert loop；
-- 增加 temperature、top-k、top-p 和可复现随机采样。
+- 已接入本地 Hugging Face tokenizer、checkpoint chat template 和增量 detokenization；
+- 已实现单文件/分片 SafeTensors 逐 tensor 加载，以及分离 Q/K/V、gate/up 到 fused 权重的映射；
+- 已用本地 Qwen3-0.6B 对齐最终 FP32 logits，并跑通 BF16 + FA2 paged-KV 单请求和并发生成；
+- 已实现 Qwen3MoE router、softmax/top-k、可选概率归一化和 expert dispatch，并与 Transformers 小 MoE logits 对齐；
+- 已增加 temperature、top-k、top-p 和独立 per-request seed；随机结果不受 continuous batch 组合影响；
+- 待云端加载真实 Qwen3MoE checkpoint，并用 grouped GEMM/Triton 替换正确性优先的 expert loop。
 
-验收：与 Transformers 对齐 layer/logits/greedy token；真实 checkpoint 完成单请求和并发 smoke test。具体型号按许可证、显存和可用 GPU 选择，不写死在架构中。
+本地 dense 验收已完成：与 Transformers 对齐 layer/logits/greedy token，真实 checkpoint 完成单请求和并发 smoke test。MoE 的小模型 oracle 已完成，真实 checkpoint 验收等待云端显存。具体型号不写死在架构中。
 
 ## 4. Scheduler 与 Cache 进阶
 

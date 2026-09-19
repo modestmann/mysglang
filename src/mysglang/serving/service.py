@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from mysglang.core import FinishReason, IncrementalOutput, Request, SamplingParams
-from mysglang.modeling.tiny import TinyCausalLM
+from mysglang.modeling.qwen3 import Qwen3ForCausalLM
 from mysglang.scheduler import Scheduler, SchedulerConfig, SchedulerStats
 
 
@@ -17,8 +17,16 @@ class IncrementalDecoder(Protocol):
 
 class Tokenizer(Protocol):
     vocab_size: int
+    eos_token_id: int | None
 
     def encode(self, text: str) -> Sequence[int]: ...
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        enable_thinking: bool = True,
+    ) -> Sequence[int]: ...
 
     def new_incremental_decoder(self) -> IncrementalDecoder: ...
 
@@ -56,12 +64,12 @@ class GenerationService:
 
     def __init__(
         self,
-        model: TinyCausalLM,
+        model: Qwen3ForCausalLM,
         tokenizer: Tokenizer,
         scheduler_config: SchedulerConfig,
     ) -> None:
-        if model.config.vocab_size != tokenizer.vocab_size:
-            raise ValueError("model vocab_size must match tokenizer vocab_size")
+        if model.config.vocab_size < tokenizer.vocab_size:
+            raise ValueError("model vocab_size is smaller than the tokenizer ID space")
         self.model = model
         self.tokenizer = tokenizer
         self.scheduler = Scheduler(model, scheduler_config)
@@ -80,15 +88,78 @@ class GenerationService:
         max_new_tokens: int,
         eos_token_id: int | None = None,
         ignore_eos: bool = False,
+        temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        seed: int | None = None,
     ) -> GenerationSession:
         prompt_token_ids = tuple(self.tokenizer.encode(prompt))
+        return self._start_token_ids(
+            prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            ignore_eos=ignore_eos,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+        )
+
+    def start_chat(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_new_tokens: int,
+        eos_token_id: int | None = None,
+        ignore_eos: bool = False,
+        enable_thinking: bool = True,
+        temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        seed: int | None = None,
+    ) -> GenerationSession:
+        prompt_token_ids = tuple(
+            self.tokenizer.apply_chat_template(
+                messages,
+                enable_thinking=enable_thinking,
+            )
+        )
+        return self._start_token_ids(
+            prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            ignore_eos=ignore_eos,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+        )
+
+    def _start_token_ids(
+        self,
+        prompt_token_ids: tuple[int, ...],
+        *,
+        max_new_tokens: int,
+        eos_token_id: int | None,
+        ignore_eos: bool,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        seed: int | None,
+    ) -> GenerationSession:
         request = Request.from_token_ids(
             f"req-{next(self._request_ids)}",
             prompt_token_ids,
             SamplingParams(
                 max_new_tokens=max_new_tokens,
-                eos_token_id=eos_token_id,
+                eos_token_id=(
+                    self.tokenizer.eos_token_id if eos_token_id is None else eos_token_id
+                ),
                 ignore_eos=ignore_eos,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                seed=seed,
             ),
         )
         self.scheduler.validate(request)

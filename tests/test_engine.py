@@ -9,6 +9,31 @@ from tests.helpers import drain_scheduler, make_model, make_request, reference_g
 
 
 class SchedulerTest(unittest.TestCase):
+    def test_cuda_graph_buckets_must_be_exact_valid_sizes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "sorted and unique"):
+            SchedulerConfig(decode_cuda_graph_batch_sizes=(2, 1))
+        with self.assertRaisesRegex(ValueError, "max_running_requests"):
+            SchedulerConfig(
+                max_running_requests=2,
+                decode_cuda_graph_batch_sizes=(3,),
+            )
+
+    @torch.inference_mode()
+    def test_dense_decode_reuses_one_metadata_buffer_per_batch_size(self) -> None:
+        scheduler = Scheduler(
+            make_model(),
+            SchedulerConfig(num_pages=8, page_size=2),
+        )
+        scheduler.add(make_request("reuse", [1, 2, 3], 4))
+        scheduler.step()
+        with patch.object(
+            scheduler.cache,
+            "allocate_decode_buffer",
+            wraps=scheduler.cache.allocate_decode_buffer,
+        ) as allocate:
+            drain_scheduler(scheduler)
+        self.assertEqual(allocate.call_count, 1)
+
     @torch.inference_mode()
     def test_mixed_batch_advances_decode_and_handles_prefill_abort(self) -> None:
         model = make_model()

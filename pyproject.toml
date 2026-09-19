@@ -12,6 +12,9 @@ dependencies = [
     "torch>=2.4,<3",
 ]
 
+[project.scripts]
+mysglang-chat = "mysglang.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
