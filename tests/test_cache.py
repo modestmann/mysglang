@@ -140,6 +140,45 @@ class PagedKVCacheTest(unittest.TestCase):
         self.cache.check_integrity()
 
     @torch.inference_mode()
+    def test_packed_ragged_prefill_matches_full_recomputation(self) -> None:
+        first = torch.tensor([1, 2])
+        second = torch.tensor([3, 4, 5])
+        self.assertTrue(self.cache.reserve_request("first-packed", 8))
+        self.assertTrue(self.cache.reserve_request("second-packed", 8))
+        self.cache.ensure_capacity("first-packed", 2)
+        self.cache.ensure_capacity("second-packed", 3)
+
+        actual = self.model.forward_packed(
+            torch.cat((first, second)),
+            kv_cache=self.cache,
+            cache_request_ids=("first-packed", "second-packed"),
+            append_lengths=(2, 3),
+        )
+        expected = torch.cat((self.model(first[None])[0], self.model(second[None])[0]))
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+        first_suffix = torch.tensor([6, 7])
+        second_suffix = torch.tensor([8])
+        self.cache.ensure_capacity("first-packed", 4)
+        self.cache.ensure_capacity("second-packed", 4)
+        actual = self.model.forward_packed(
+            torch.cat((first_suffix, second_suffix)),
+            kv_cache=self.cache,
+            cache_request_ids=("first-packed", "second-packed"),
+            append_lengths=(2, 1),
+        )
+        expected_first = self.model(torch.cat((first, first_suffix))[None])[0, -2:]
+        expected_second = self.model(torch.cat((second, second_suffix))[None])[0, -1:]
+        torch.testing.assert_close(
+            actual,
+            torch.cat((expected_first, expected_second)),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        self.assertEqual(self.cache.lengths(("first-packed", "second-packed")), (4, 4))
+        self.cache.check_integrity()
+
+    @torch.inference_mode()
     def test_chunked_prefill_crosses_page_boundaries(self) -> None:
         prompt = torch.tensor([[1, 2, 3, 4, 5]])
         self.assertTrue(self.cache.reserve_request("chunked", 8))

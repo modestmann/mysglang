@@ -73,6 +73,46 @@ class AttentionBackendTest(unittest.TestCase):
             rtol=3e-3,
         )
 
+        packed_reference_cache = self._make_cache(reference, config)
+        packed_flash_cache = self._make_cache(flash, config)
+        packed_request_ids = ("packed-short", "packed-long")
+        for cache in (packed_reference_cache, packed_flash_cache):
+            for request_id, length in zip(packed_request_ids, (3, 5)):
+                self.assertTrue(cache.reserve_request(request_id, 32))
+                cache.ensure_capacity(request_id, length)
+        packed_input = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], device="cuda")
+        expected = reference.forward_packed(
+            packed_input,
+            kv_cache=packed_reference_cache,
+            cache_request_ids=packed_request_ids,
+            append_lengths=(3, 5),
+        )
+        actual = flash.forward_packed(
+            packed_input,
+            kv_cache=packed_flash_cache,
+            cache_request_ids=packed_request_ids,
+            append_lengths=(3, 5),
+        )
+        torch.testing.assert_close(actual, expected, atol=3e-3, rtol=3e-3)
+
+        for cache in (packed_reference_cache, packed_flash_cache):
+            cache.ensure_capacity("packed-short", 5)
+            cache.ensure_capacity("packed-long", 6)
+        packed_suffix = torch.tensor([9, 10, 11], device="cuda")
+        expected = reference.forward_packed(
+            packed_suffix,
+            kv_cache=packed_reference_cache,
+            cache_request_ids=packed_request_ids,
+            append_lengths=(2, 1),
+        )
+        actual = flash.forward_packed(
+            packed_suffix,
+            kv_cache=packed_flash_cache,
+            cache_request_ids=packed_request_ids,
+            append_lengths=(2, 1),
+        )
+        torch.testing.assert_close(actual, expected, atol=3e-3, rtol=3e-3)
+
         reference_cache = self._make_cache(reference, config)
         flash_cache = self._make_cache(flash, config)
         prompts = {
@@ -140,6 +180,27 @@ class AttentionBackendTest(unittest.TestCase):
         actual_tokens = self._run_request(flash_scheduler, "shared", shared_prompt)
         self.assertEqual(actual_tokens, expected_tokens)
         self.assertEqual(flash_scheduler.prefill_input_tokens - prefill_before, 44)
+
+        ragged_config = SchedulerConfig(
+            max_running_requests=3,
+            prefill_token_budget=128,
+            num_pages=6,
+            page_size=256,
+        )
+        reference_ragged = Scheduler(reference, ragged_config)
+        flash_ragged = Scheduler(flash, ragged_config)
+        ragged_prompts = {
+            "ragged-short": [index % config.vocab_size for index in range(20)],
+            "ragged-medium": [index % config.vocab_size for index in range(70)],
+            "ragged-long": [index % config.vocab_size for index in range(150)],
+        }
+        for scheduler in (reference_ragged, flash_ragged):
+            for request_id, prompt in ragged_prompts.items():
+                scheduler.add(make_request(request_id, prompt, max_new_tokens=3))
+        expected = drain_scheduler(reference_ragged)
+        actual = drain_scheduler(flash_ragged)
+        self.assertEqual(actual, expected)
+        self.assertEqual(flash_ragged.stats.max_prefill_batch_size, 3)
 
     @staticmethod
     def _make_cache(model: TinyCausalLM, config: ModelConfig) -> PagedKVCache:

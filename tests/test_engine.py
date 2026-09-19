@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -78,7 +79,38 @@ class SchedulerTest(unittest.TestCase):
 
         phases = [scheduler.step().phase for _ in range(5)]
 
-        self.assertEqual(phases, ["decode", "prefill", "decode", "prefill", "decode"])
+        self.assertEqual(phases, ["decode", "prefill", "decode", "decode", "decode"])
+        self.assertEqual(scheduler.stats.max_prefill_batch_size, 3)
+
+    @torch.inference_mode()
+    def test_prefill_packs_different_chunk_lengths_into_one_forward(self) -> None:
+        scheduler = Scheduler(
+            make_model(),
+            SchedulerConfig(
+                max_running_requests=3,
+                prefill_token_budget=7,
+                num_pages=16,
+                page_size=2,
+            ),
+        )
+        scheduler.add(make_request("short", [1, 2], 1))
+        scheduler.add(make_request("medium", [3, 4, 5, 6], 1))
+        scheduler.add(make_request("long", [7, 8, 9, 10, 11, 12, 13], 1))
+
+        with patch.object(
+            scheduler.model,
+            "forward_packed",
+            wraps=scheduler.model.forward_packed,
+        ) as forward_packed:
+            step = scheduler.step()
+
+        self.assertEqual(step.request_ids, ("short", "medium", "long"))
+        self.assertEqual(step.input_tokens, 7)
+        self.assertEqual(forward_packed.call_count, 1)
+        self.assertEqual(forward_packed.call_args.kwargs["append_lengths"], (2, 2, 3))
+        self.assertEqual(scheduler.stats.max_prefill_batch_size, 3)
+        scheduler.check_integrity()
+        drain_scheduler(scheduler)
 
     @torch.inference_mode()
     def test_prefill_prefix_is_reusable_before_publisher_finishes(self) -> None:

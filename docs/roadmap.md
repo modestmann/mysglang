@@ -24,14 +24,14 @@
 
 当前保证：主入口没有隐式后端选择；未消费 session 不进入 Scheduler；正常完成、异常和 abort 后页面与 handle 全部回收。
 
-## 2. GPU AttentionBackend（第二阶段 metadata 已完成）
+## 2. GPU AttentionBackend（ragged Prefill 已完成）
 
 - 已把 PyTorch gather/pad 路径收敛为 `TorchAttentionBackend` correctness oracle；
 - 已接入 `FlashAttentionBackend`，Prefill/Decode 直接消费物理 KV pool、block tables 和 sequence lengths；
 - 已在 RTX 4060 Laptop（SM89）验证 uncached、paged Prefill 和变长 batch Decode 与 reference 对齐；
 - 已用 `PagedKVBatch` 把 block table、旧长度和追加范围提升为一次 forward 构造、所有层复用的 metadata；
-- 下一步选择支持 paged append 的 ragged kernel/布局，实现 flattened multi-request Prefill 并保留 chunked prefill；
-- 在 metadata 稳定后，为固定 Decode bucket 加入 CUDA Graph；
+- 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FA2 paged-varlen kernel 直接读取历史页；
+- 下一步复用 metadata buffer，并为固定 Decode bucket 加入 CUDA Graph；
 - GPU 不支持所选 kernel 时给出明确错误或显式回退。
 
 验收：reference 与 GPU backend 的 logits/token 在约定容差内一致；记录 TTFT、TPOT、吞吐、峰值显存、backend、dtype、shape 和 GPU 信息。
@@ -48,7 +48,7 @@
 
 ## 4. Scheduler 与 Cache 进阶
 
-- 从单请求 Prefill step 升级为多请求 flattened/ragged Prefill；
+- 用实测代价模型改进 ragged Prefill 的 token budget 分配；
 - 用实测 TTFT/TPOT deadline 和 batch cost 替换固定公平上限；
 - 避免容量受限时 waiting 队首大请求造成小请求 head-of-line blocking；
 - 加入 forward/scheduler overlap；

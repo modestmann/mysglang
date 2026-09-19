@@ -27,7 +27,7 @@ HTTP / caller
 
 scheduler worker
   -> Scheduler.step()
-       -> 选择一段 Prefill，或所有可运行请求的一轮 Decode
+       -> 选择一个 ragged Prefill batch，或所有可运行请求的一轮 Decode
        -> 准备 KV 页面和模型输入
        -> one model forward
        -> 产生多个 IncrementalOutput
@@ -92,10 +92,10 @@ WAITING -> PREFILL -> DECODING -> FINISHED
 Scheduler 维护三个主要区域：
 
 ```text
-waiting deque -> prefilling（最多一个请求） -> running insertion-ordered map
+waiting deque -> prefilling insertion-ordered map -> running insertion-ordered map
 ```
 
-Prefill 受 token budget 限制，可以跨多个 step；Decode 把当前所有 running 请求组成动态 batch。持续有新请求时，`max_consecutive_prefill_steps` 限制连续 Prefill 次数，避免已有 Decode 无限等待。没有可用容量时，waiting 请求保持等待，已准入请求继续运行直至释放容量。
+Prefill 每步在 token budget 内准入多个请求，并把不同长度的 chunk flatten 成一个 packed token tensor；未完成的长请求轮转到 Prefill 队尾。Decode 把当前所有 running 请求组成动态 batch。持续有新请求时，`max_consecutive_prefill_steps` 限制连续 Prefill 次数，避免已有 Decode 无限等待。没有可用容量时，waiting 请求保持等待，已准入请求继续运行直至释放容量。
 
 每次 `step()` 由唯一 worker 同步驱动，因此模型、Scheduler 和 cache metadata 不会被多个 coroutine 同时修改。这里的“串行”只指控制循环；一次模型 forward 内仍可以包含多个请求。
 
@@ -137,12 +137,12 @@ KV address    = pool[layer, 1, 2]
 
 | Backend | KV 路径 | 用途 |
 |---|---|---|
-| `TorchAttentionBackend` | Python 写页，再 gather/pad 成 dense tensor，调用 PyTorch SDPA | CPU 测试与 correctness oracle |
-| `FlashAttentionBackend` | `flash_attn_with_kvcache` 直接读取物理 pool 和 block table，并在同一 kernel 中追加 K/V | CUDA Prefill/Decode |
+| `TorchAttentionBackend` | 写页后 gather；dense batch 用 padded SDPA，packed batch 逐请求调用 SDPA | CPU 测试与 correctness oracle |
+| `FlashAttentionBackend` | Decode 使用 `flash_attn_with_kvcache`；ragged Prefill 使用 slot scatter + paged `flash_attn_varlen_func` | CUDA Prefill/Decode |
 
-模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成这一轮所有层共享的 request IDs、追加范围、`cache_seqlens` 和 block table。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。Torch oracle 通过 `stage_append()` 写页并 gather；FA2 kernel 则直接写物理 pool。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
+模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FA2 varlen kernel 再直接按 block table 读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。`PagedKVBatch` 已允许各层复用 metadata，但当前模型输入仍是 dense `[batch, sequence]`，所以一轮中新追加的 chunk 必须等长；变长历史 KV 不受这个限制。真正的 ragged Prefill 需要 flattened tokens、累计长度和支持 paged append 的对应 kernel，不能用 padding 冒充。
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。Decode 仍使用 dense `[batch, 1]`；Prefill 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。当前 metadata 和 slot mapping 仍在 Python 中逐 batch 构造，后续可通过复用 buffer 和固定 bucket 继续降低开销。
 
 ## 5. Radix prefix cache
 
@@ -204,7 +204,7 @@ align_down(len(prompt) - 1, page_size)
 |---|---|---|
 | 运行架构 | 多进程、每个 TP rank 持有 Scheduler/Engine | 单进程，先使状态和所有权可观察 |
 | 请求状态 | 主要由对象所在容器和长度字段隐式表达 | 显式 enum、迁移检查和终止事件 |
-| 调度 | 简洁的 Prefill-before-Decode 路径，支持更完整的 flattened Prefill | 有界连续 Prefill，当前每步只 Prefill 一个请求 |
+| 调度 | 简洁的 Prefill-before-Decode 路径，支持成熟的 flattened Prefill | 有界连续 Prefill，当前可在 token budget 内打包多个变长请求 |
 | 页表表示 | 内部保存展开后的 physical token indices | block table 直接保存 physical page IDs |
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
@@ -218,7 +218,7 @@ align_down(len(prompt) - 1, page_size)
 - 模型是随机 tiny dense Qwen3，没有真实 tokenizer、checkpoint 或 MoE；
 - sampling 只有 greedy；
 - 单进程同步 worker，没有 scheduler/forward overlap；
-- Prefill 没有多请求 ragged/flattened batch；
+- ragged Prefill 已打通，但 metadata/slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；

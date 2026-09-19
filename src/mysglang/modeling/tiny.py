@@ -35,16 +35,19 @@ class RotaryEmbedding(nn.Module):
     def forward(
         self, query: torch.Tensor, key: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # query/key: [batch, heads, sequence, head_dim]
+        # Dense Q/K are rank 4; packed Q/K are [total_tokens, heads, head_dim].
         embeddings = self.cos[positions]
-        if positions.ndim == 1:
+        if query.ndim == 3 and positions.ndim == 1:
+            cos = embeddings[:, None, :]
+            sin = self.sin[positions][:, None, :]
+        elif query.ndim == 4 and positions.ndim == 1:
             cos = embeddings[None, None, :, :]
             sin = self.sin[positions][None, None, :, :]
-        elif positions.ndim == 2:
+        elif query.ndim == 4 and positions.ndim == 2:
             cos = embeddings[:, None, :, :]
             sin = self.sin[positions][:, None, :, :]
         else:
-            raise ValueError("positions must have shape [sequence] or [batch, sequence]")
+            raise ValueError("positions shape does not match dense or packed Q/K")
         cos = cos.to(dtype=query.dtype, device=query.device)
         sin = sin.to(dtype=query.dtype, device=query.device)
         return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
@@ -88,10 +91,20 @@ class CausalSelfAttention(nn.Module):
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
+        if x.ndim == 3:
+            batch_size, seq_len, _ = x.shape
 
-        def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
-            return tensor.view(batch_size, seq_len, heads, self.head_dim).transpose(1, 2)
+            def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
+                return tensor.view(batch_size, seq_len, heads, self.head_dim).transpose(1, 2)
+
+        elif x.ndim == 2:
+            total_tokens = x.size(0)
+
+            def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
+                return tensor.view(total_tokens, heads, self.head_dim)
+
+        else:
+            raise ValueError("hidden states must be dense rank 3 or packed rank 2")
 
         query = self.q_norm(split_heads(self.q_proj(x), self.num_heads))
         key = self.k_norm(split_heads(self.k_proj(x), self.num_kv_heads))
@@ -105,7 +118,10 @@ class CausalSelfAttention(nn.Module):
             kv_cache=kv_cache,
             cache_batch=cache_batch,
         )
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        if output.ndim == 4:
+            output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        else:
+            output = output.reshape(output.size(0), -1)
         return self.o_proj(output)
 
 
@@ -207,6 +223,44 @@ class TinyCausalLM(nn.Module):
 
         if max_total_length > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
+
+        return self._forward_tokens(input_ids, positions, kv_cache, cache_batch)
+
+    def forward_packed(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        kv_cache: PagedKVCache,
+        cache_request_ids: tuple[str, ...],
+        append_lengths: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Run flattened variable-length chunks without padding query tokens."""
+        if input_ids.ndim != 1:
+            raise ValueError("packed input_ids must have shape [total_tokens]")
+        if input_ids.numel() == 0:
+            raise ValueError("packed input_ids must not be empty")
+        if len(cache_request_ids) != len(append_lengths):
+            raise ValueError("request IDs and append lengths must have the same size")
+
+        cache_batch = kv_cache.prepare_batch(cache_request_ids, append_lengths)
+        if input_ids.numel() != cache_batch.total_tokens:
+            raise ValueError("packed input token count disagrees with append lengths")
+        if cache_batch.max_end > self.config.max_position_embeddings:
+            raise ValueError("sequence exceeds max_position_embeddings")
+        return self._forward_tokens(
+            input_ids,
+            cache_batch.positions,
+            kv_cache,
+            cache_batch,
+        )
+
+    def _forward_tokens(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: PagedKVCache | None,
+        cache_batch: PagedKVBatch | None,
+    ) -> torch.Tensor:
 
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:

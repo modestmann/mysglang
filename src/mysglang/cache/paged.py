@@ -36,11 +36,27 @@ class PagedKVBatch:
     ends: tuple[int, ...]
     block_table: torch.Tensor
     cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    positions: torch.Tensor
+    slot_mapping: torch.Tensor
     _owner_token: object = field(repr=False, compare=False)
 
     @property
     def batch_size(self) -> int:
         return len(self.request_ids)
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(self.append_lengths)
+
+    @property
+    def max_append_length(self) -> int:
+        return max(self.append_lengths)
+
+    @property
+    def max_end(self) -> int:
+        return max(self.ends)
 
     @property
     def uniform_append_length(self) -> int:
@@ -461,6 +477,19 @@ class PagedKVCache:
                 device=self._keys.device,
             )
 
+        cumulative_q = [0]
+        cumulative_k = [0]
+        positions: list[int] = []
+        slots: list[int] = []
+        for start, end, table in zip(starts, ends, tables):
+            cumulative_q.append(cumulative_q[-1] + end - start)
+            cumulative_k.append(cumulative_k[-1] + end)
+            positions.extend(range(start, end))
+            slots.extend(
+                table[position // self.page_size] * self.page_size + position % self.page_size
+                for position in range(start, end)
+            )
+
         return PagedKVBatch(
             request_ids=requests,
             starts=starts,
@@ -468,8 +497,48 @@ class PagedKVCache:
             ends=ends,
             block_table=block_table,
             cache_seqlens=torch.tensor(starts, dtype=torch.int32, device=self._keys.device),
+            cu_seqlens_q=torch.tensor(
+                cumulative_q,
+                dtype=torch.int32,
+                device=self._keys.device,
+            ),
+            cu_seqlens_k=torch.tensor(
+                cumulative_k,
+                dtype=torch.int32,
+                device=self._keys.device,
+            ),
+            positions=torch.tensor(positions, dtype=torch.long, device=self._keys.device),
+            slot_mapping=torch.tensor(slots, dtype=torch.long, device=self._keys.device),
             _owner_token=self._batch_owner_token,
         )
+
+    def write_append(
+        self,
+        plan: PagedKVAppendPlan,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        """Scatter dense or packed new K/V into their physical token slots."""
+        batch = plan.batch
+        self._validate_batch(batch)
+        if key.ndim == 4:
+            packed_key = key.transpose(1, 2).reshape(
+                batch.total_tokens,
+                key.size(1),
+                key.size(3),
+            )
+            packed_value = value.transpose(1, 2).reshape_as(packed_key)
+        elif key.ndim == 3:
+            packed_key = key
+            packed_value = value
+        else:
+            raise ValueError("key/value must be dense rank 4 or packed rank 3 tensors")
+
+        flat_keys = plan.key_cache.view(-1, packed_key.size(1), packed_key.size(2))
+        flat_values = plan.value_cache.view(-1, packed_key.size(1), packed_key.size(2))
+        with torch.no_grad():
+            flat_keys.index_copy_(0, batch.slot_mapping, packed_key)
+            flat_values.index_copy_(0, batch.slot_mapping, packed_value)
 
     @staticmethod
     def _validate_batch_inputs(
@@ -495,17 +564,7 @@ class PagedKVCache:
         """Write K/V and gather the reference tensors without advancing lengths."""
         batch = plan.batch
         chunk_length = batch.uniform_append_length
-
-        with torch.no_grad():
-            for batch_index, (request_id, start, end) in enumerate(
-                zip(batch.request_ids, batch.starts, batch.ends)
-            ):
-                page_table = self.allocator.page_table(request_id)
-                for chunk_index, position in enumerate(range(start, end)):
-                    page = page_table[position // self.page_size]
-                    offset = position % self.page_size
-                    plan.key_cache[page, offset].copy_(key[batch_index, :, chunk_index])
-                    plan.value_cache[page, offset].copy_(value[batch_index, :, chunk_index])
+        self.write_append(plan, key, value)
 
         max_end = max(batch.ends)
         keys = key.new_zeros((batch.batch_size, key.size(1), max_end, key.size(3)))
@@ -528,6 +587,32 @@ class PagedKVCache:
         attention_mask = key_positions[None, None, :] <= query_positions[:, :, None]
         return keys, values, attention_mask[:, None, :, :]
 
+    def stage_packed_append(
+        self,
+        plan: PagedKVAppendPlan,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        """Write packed K/V and gather each request separately for the oracle."""
+        if key.ndim != 3:
+            raise ValueError("packed key/value must have rank 3")
+        self.write_append(plan, key, value)
+
+        keys = []
+        values = []
+        flat_keys = plan.key_cache.view(-1, key.size(1), key.size(2))
+        flat_values = plan.value_cache.view(-1, key.size(1), key.size(2))
+        for request_id, length in zip(plan.batch.request_ids, plan.batch.ends):
+            table = self.allocator.page_table(request_id)
+            physical_indices = [
+                table[position // self.page_size] * self.page_size + position % self.page_size
+                for position in range(length)
+            ]
+            index = torch.tensor(physical_indices, dtype=torch.long, device=key.device)
+            keys.append(flat_keys.index_select(0, index))
+            values.append(flat_values.index_select(0, index))
+        return tuple(keys), tuple(values)
+
     def prepare_append(
         self,
         layer_idx: int,
@@ -540,22 +625,29 @@ class PagedKVCache:
         self._validate_batch(batch)
         requests = batch.request_ids
 
-        expected = (len(requests), self._keys.size(3), self._keys.size(4))
-        actual = (key.size(0), key.size(1), key.size(3)) if key.ndim == 4 else None
-
-        if actual != expected:
-            raise ValueError(
-                "key must have shape "
-                f"[{len(requests)}, {self._keys.size(3)}, sequence, {self._keys.size(4)}]"
-            )
+        if key.ndim == 4:
+            expected = (len(requests), self._keys.size(3), self._keys.size(4))
+            actual = (key.size(0), key.size(1), key.size(3))
+            if actual != expected:
+                raise ValueError(
+                    "dense key must have shape "
+                    f"[{len(requests)}, {self._keys.size(3)}, sequence, "
+                    f"{self._keys.size(4)}]"
+                )
+            if key.size(2) != batch.uniform_append_length:
+                raise ValueError("key/value sequence length disagrees with batch metadata")
+        elif key.ndim == 3:
+            expected = (batch.total_tokens, self._keys.size(3), self._keys.size(4))
+            if key.shape != expected:
+                raise ValueError(f"packed key must have shape {expected}")
+        else:
+            raise ValueError("key/value must be dense rank 4 or packed rank 3 tensors")
         if value.shape != key.shape:
             raise ValueError("key and value must have the same shape")
         if key.device != self._keys.device or value.device != self._values.device:
             raise ValueError("key/value device must match the cache device")
         if key.dtype != self._keys.dtype or value.dtype != self._values.dtype:
             raise ValueError("key/value dtype must match the cache dtype")
-        if key.size(2) != batch.uniform_append_length:
-            raise ValueError("key/value sequence length disagrees with batch metadata")
         if self.layer_lengths(layer_idx, requests) != batch.starts:
             raise RuntimeError("paged KV batch metadata is stale for this layer")
 

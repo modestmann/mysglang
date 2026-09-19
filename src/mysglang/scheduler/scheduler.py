@@ -34,6 +34,7 @@ class SchedulerStats:
     finished_requests: int
     aborted_requests: int
     model_forwards: int
+    max_prefill_batch_size: int
     max_decode_batch_size: int
     max_wait_steps: int
     prefill_input_tokens: int
@@ -69,7 +70,7 @@ class Scheduler:
         self.model.validate_cache(self.cache)
         self._device = parameter.device
         self._waiting: deque[_Entry] = deque()
-        self._prefilling: _Entry | None = None
+        self._prefilling: dict[str, _Entry] = {}
         self._running: dict[str, _Entry] = {}
         # 所有未结束请求的总索引：waiting + prefilling + running。
         self._entries: dict[str, _Entry] = {}
@@ -79,6 +80,7 @@ class Scheduler:
         self._finished_requests = 0
         self._aborted_requests = 0
         self._model_forwards = 0
+        self._max_prefill_batch_size = 0
         self._max_decode_batch_size = 0
         self._max_wait_steps = 0
         # 只保留累计量，不保存无限增长的逐步 history。
@@ -96,12 +98,13 @@ class Scheduler:
     def stats(self) -> SchedulerStats:
         return SchedulerStats(
             active_requests=len(self._entries),
-            waiting_requests=len(self._waiting) + (self._prefilling is not None),
+            waiting_requests=len(self._waiting) + len(self._prefilling),
             running_requests=len(self._running),
             max_active_requests=self._max_active_requests,
             finished_requests=self._finished_requests,
             aborted_requests=self._aborted_requests,
             model_forwards=self._model_forwards,
+            max_prefill_batch_size=self._max_prefill_batch_size,
             max_decode_batch_size=self._max_decode_batch_size,
             max_wait_steps=self._max_wait_steps,
             prefill_input_tokens=self._prefill_input_tokens,
@@ -138,8 +141,8 @@ class Scheduler:
         entry = self._entries.get(request_id)
         if entry is None or entry.request.is_terminal:
             return None
-        if self._prefilling is entry:
-            self._prefilling = None
+        if request_id in self._prefilling:
+            self._prefilling.pop(request_id)
         else:
             try:
                 self._waiting.remove(entry)
@@ -180,9 +183,7 @@ class Scheduler:
     def check_integrity(self) -> None:
         self.cache.check_integrity()
         cache_requests = set(self.cache.allocator.request_ids)
-        scheduled_requests = set(self._running)
-        if self._prefilling is not None:
-            scheduled_requests.add(self._prefilling.request.request_id)
+        scheduled_requests = set(self._running) | set(self._prefilling)
         if cache_requests != scheduled_requests:
             raise RuntimeError("scheduler and paged cache disagree about active owners")
         waiting_ids = {entry.request.request_id for entry in self._waiting}
@@ -192,16 +193,17 @@ class Scheduler:
             raise RuntimeError("scheduler request indexes disagree")
         if any(entry.request.state is not RequestState.WAITING for entry in self._waiting):
             raise RuntimeError("waiting queue contains a request in the wrong state")
-        if self._prefilling is not None:
-            if self._prefilling.request.state is not RequestState.PREFILL:
-                raise RuntimeError("prefill slot contains a request in the wrong state")
+        if any(
+            entry.request.state is not RequestState.PREFILL for entry in self._prefilling.values()
+        ):
+            raise RuntimeError("prefill set contains a request in the wrong state")
         if any(
             entry.request.state is not RequestState.DECODING for entry in self._running.values()
         ):
             raise RuntimeError("running map contains a request in the wrong state")
 
     def _can_prefill(self) -> bool:
-        if self._prefilling is not None:
+        if self._prefilling:
             return True
         if not self._waiting:
             return False
@@ -213,10 +215,89 @@ class Scheduler:
         )
 
     def _prefill_step(self) -> SchedulerStep:
-        entry = self._prefilling
-        if entry is None:
+        self._admit_prefill_requests()
+        entries = list(self._prefilling.values())
+        selected = entries[: min(len(entries), self.config.prefill_token_budget)]
+        remaining_budget = self.config.prefill_token_budget
+        chunks: list[tuple[_Entry, int, int]] = []
+        for index, entry in enumerate(selected):
+            requests_left = len(selected) - index
+            fair_share = max(1, remaining_budget // requests_left)
+            start = entry.prefill_offset
+            end = min(start + fair_share, len(entry.request.prompt_token_ids))
+            chunks.append((entry, start, end))
+            remaining_budget -= end - start
+
+        request_ids = tuple(entry.request.request_id for entry, _, _ in chunks)
+        append_lengths = tuple(end - start for _, start, end in chunks)
+        packed_tokens = []
+        for entry, start, end in chunks:
+            request_id = entry.request.request_id
+            # reservation 是容量承诺；这里才从 free pages 取物理页并写入请求页表。
+            self.cache.ensure_capacity(request_id, end)
+            packed_tokens.extend(entry.request.prompt_token_ids[start:end])
+
+        input_ids = torch.tensor(
+            packed_tokens,
+            dtype=torch.long,
+            device=self._device,
+        )
+        logits = self.model.forward_packed(
+            input_ids,
+            kv_cache=self.cache,
+            cache_request_ids=request_ids,
+            append_lengths=append_lengths,
+        )
+        self._model_forwards += 1
+        input_token_count = sum(append_lengths)
+        self._prefill_input_tokens += input_token_count
+        self._max_prefill_batch_size = max(self._max_prefill_batch_size, len(chunks))
+
+        outputs = []
+        packed_offset = 0
+        for entry, start, end in chunks:
+            request = entry.request
+            request_id = request.request_id
+            chunk_length = end - start
+            entry.prefill_offset = end
+            self._prefilling.pop(request_id)
+
+            if end == len(request.prompt_token_ids):
+                # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
+                self.cache.publish_prefix(request_id, request.prompt_token_ids)
+                request.start_decode()
+                next_token = int(logits[packed_offset + chunk_length - 1].argmax().item())
+                event = request.record_token(next_token)
+                outputs.append(event)
+                if event.finished:
+                    self._release(entry, finished=True)
+                else:
+                    self._running[request_id] = entry
+            else:
+                # 被选中但尚未完成的长请求移到队尾，避免小 budget 下独占 Prefill。
+                self._prefilling[request_id] = entry
+            packed_offset += chunk_length
+
+        return SchedulerStep(
+            index=self._step_index,
+            phase="prefill",
+            request_ids=request_ids,
+            input_tokens=input_token_count,
+            outputs=tuple(outputs),
+        )
+
+    def _admit_prefill_requests(self) -> None:
+        while (
+            self._waiting
+            and self.cache.allocator.stats.request_count < self.config.max_running_requests
+        ):
             entry = self._waiting[0]
             request = entry.request
+            if not self.cache.can_reserve_request(
+                self._max_request_tokens(request),
+                request.prompt_token_ids,
+            ):
+                break
             matched = self.cache.reserve_request_with_prefix(
                 request.request_id,
                 self._max_request_tokens(request),
@@ -227,53 +308,8 @@ class Scheduler:
             self._waiting.popleft()
             request.start_prefill()
             entry.prefill_offset = matched
-            self._prefilling = entry
+            self._prefilling[request.request_id] = entry
             self._max_wait_steps = max(self._max_wait_steps, self._step_index - entry.enqueue_step)
-
-        start = entry.prefill_offset
-        end = min(
-            start + self.config.prefill_token_budget,
-            len(entry.request.prompt_token_ids),
-        )
-        request_id = entry.request.request_id
-
-        # reservation 是容量承诺；这里才从 free pages 取物理页并写入请求页表。
-        self.cache.ensure_capacity(request_id, end)
-        input_ids = torch.tensor(
-            [entry.request.prompt_token_ids[start:end]],
-            dtype=torch.long,
-            device=self._device,
-        )
-        logits = self.model(
-            input_ids,
-            kv_cache=self.cache,
-            cache_request_ids=(request_id,),
-        )
-        self._model_forwards += 1
-        self._prefill_input_tokens += end - start
-        entry.prefill_offset = end
-        outputs: tuple[IncrementalOutput, ...] = ()
-
-        if end == len(entry.request.prompt_token_ids):
-            # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束，后来的请求即可复用。
-            self.cache.publish_prefix(request_id, entry.request.prompt_token_ids)
-            entry.request.start_decode()
-            next_token = int(logits[:, -1].argmax(dim=-1).item())
-            event = entry.request.record_token(next_token)
-            outputs = (event,)
-            self._prefilling = None
-            if event.finished:
-                self._release(entry, finished=True)
-            else:
-                self._running[request_id] = entry
-
-        return SchedulerStep(
-            index=self._step_index,
-            phase="prefill",
-            request_ids=(request_id,),
-            input_tokens=end - start,
-            outputs=outputs,
-        )
 
     def _decode_step(self) -> SchedulerStep:
         entries = list(self._running.values())
