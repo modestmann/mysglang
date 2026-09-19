@@ -3,7 +3,7 @@
 MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前主路径已经从单请求生成演进为：
 
 - 显式请求状态与增量输出事件；
-- continuous batching、ragged/chunked prefill 和动态 decode batch；
+- continuous batching、ragged/chunked prefill、Prefill/Decode 混合 batch；
 - 共享 Paged KV Cache、容量预留和 OOM-safe admission；
 - page-aligned Radix prefix cache、引用保护与按需淘汰；
 - 可切换的 PyTorch reference / FlashAttention 2 attention backend；

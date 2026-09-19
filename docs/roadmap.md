@@ -31,6 +31,7 @@
 - 已在 RTX 4060 Laptop（SM89）验证 uncached、paged Prefill 和变长 batch Decode 与 reference 对齐；
 - 已用 `PagedKVBatch` 把 block table、旧长度和追加范围提升为一次 forward 构造、所有层复用的 metadata；
 - 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FA2 paged-varlen kernel 直接读取历史页；
+- 已实现 Prefill/Decode 混合 forward：已有 Decode 每轮推进一个 token，Prefill 在独立 token budget 内打包；
 - 下一步复用 metadata buffer，并为固定 Decode bucket 加入 CUDA Graph；
 - GPU 不支持所选 kernel 时给出明确错误或显式回退。
 

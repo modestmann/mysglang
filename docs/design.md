@@ -27,7 +27,7 @@ HTTP / caller
 
 scheduler worker
   -> Scheduler.step()
-       -> 选择一个 ragged Prefill batch，或所有可运行请求的一轮 Decode
+       -> 所有 Decode token 与 Prefill chunks 组成混合 batch；无 Prefill 时执行纯 Decode
        -> 准备 KV 页面和模型输入
        -> one model forward
        -> 产生多个 IncrementalOutput
@@ -95,7 +95,9 @@ Scheduler 维护三个主要区域：
 waiting deque -> prefilling insertion-ordered map -> running insertion-ordered map
 ```
 
-Prefill 每步在 token budget 内准入多个请求，并把不同长度的 chunk flatten 成一个 packed token tensor；未完成的长请求轮转到 Prefill 队尾。Decode 把当前所有 running 请求组成动态 batch。持续有新请求时，`max_consecutive_prefill_steps` 限制连续 Prefill 次数，避免已有 Decode 无限等待。没有可用容量时，waiting 请求保持等待，已准入请求继续运行直至释放容量。
+每个 step 都让已有 Decode 请求各推进一个 token。有 Prefill 时，将 Decode tokens 放在前面，再拼接多个变长 Prefill chunks，一次 packed forward 完成，phase 为 `mixed`；仅有 Prefill 时为 `prefill`，仅有 Decode 时保留 dense 路径并标为 `decode`。`prefill_token_budget` 只限制 Prefill token，总输入上限为该 budget 加 Decode 请求数。未完成的长请求轮转到 Prefill 队尾；新完成 Prompt 的请求下轮才开始输入首个输出 token。旧的 `max_consecutive_prefill_steps` 配置已删除。没有可用容量时，waiting 请求保持等待，已准入请求继续推进。
+
+混合执行保证 Decode 每轮有进展，但长 Prefill chunk 仍可能拉长该轮耗时；当前没有 TTFT/TPOT 延迟保证，需要通过实测调整 budget。
 
 每次 `step()` 由唯一 worker 同步驱动，因此模型、Scheduler 和 cache metadata 不会被多个 coroutine 同时修改。这里的“串行”只指控制循环；一次模型 forward 内仍可以包含多个请求。
 
@@ -138,11 +140,11 @@ KV address    = pool[layer, 1, 2]
 | Backend | KV 路径 | 用途 |
 |---|---|---|
 | `TorchAttentionBackend` | 写页后 gather；dense batch 用 padded SDPA，packed batch 逐请求调用 SDPA | CPU 测试与 correctness oracle |
-| `FlashAttentionBackend` | Decode 使用 `flash_attn_with_kvcache`；ragged Prefill 使用 slot scatter + paged `flash_attn_varlen_func` | CUDA Prefill/Decode |
+| `FlashAttentionBackend` | 纯 Decode 使用 `flash_attn_with_kvcache`；Prefill 和混合 batch 使用 slot scatter + paged `flash_attn_varlen_func` | CUDA Prefill/Decode |
 
 模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FA2 varlen kernel 再直接按 block table 读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。Decode 仍使用 dense `[batch, 1]`；Prefill 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。当前 metadata 和 slot mapping 仍在 Python 中逐 batch 构造，后续可通过复用 buffer 和固定 bucket 继续降低开销。
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。当前 metadata 和 slot mapping 仍在 Python 中逐 batch 构造，后续可通过复用 buffer 和固定 bucket 继续降低开销。
 
 ## 5. Radix prefix cache
 
@@ -204,7 +206,7 @@ align_down(len(prompt) - 1, page_size)
 |---|---|---|
 | 运行架构 | 多进程、每个 TP rank 持有 Scheduler/Engine | 单进程，先使状态和所有权可观察 |
 | 请求状态 | 主要由对象所在容器和长度字段隐式表达 | 显式 enum、迁移检查和终止事件 |
-| 调度 | 简洁的 Prefill-before-Decode 路径，支持成熟的 flattened Prefill | 有界连续 Prefill，当前可在 token budget 内打包多个变长请求 |
+| 调度 | 简洁的 Prefill-before-Decode 路径，支持成熟的 flattened Prefill | Decode 每轮推进，与 budget 内的变长 Prefill 合为一次 forward |
 | 页表表示 | 内部保存展开后的 physical token indices | block table 直接保存 physical page IDs |
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |

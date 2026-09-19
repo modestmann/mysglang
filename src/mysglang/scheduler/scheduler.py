@@ -75,7 +75,6 @@ class Scheduler:
         # 所有未结束请求的总索引：waiting + prefilling + running。
         self._entries: dict[str, _Entry] = {}
         self._step_index = 0
-        self._consecutive_prefill_steps = 0
         self._max_active_requests = 0
         self._finished_requests = 0
         self._aborted_requests = 0
@@ -155,22 +154,11 @@ class Scheduler:
 
     @torch.inference_mode()
     def step(self) -> SchedulerStep | None:
-        """Run one scheduling decision: one prefill chunk or one decode batch."""
-        can_prefill = self._can_prefill()
-        should_prefill = can_prefill and (
-            not self._running
-            or self._consecutive_prefill_steps < self.config.max_consecutive_prefill_steps
-        )
-
-        if should_prefill:
+        """Include every running decode in a prefill step, or run dense decode."""
+        if self._can_prefill():
             result = self._prefill_step()
-            self._consecutive_prefill_steps += 1
         elif self._running:
             result = self._decode_step()
-            self._consecutive_prefill_steps = 0
-        elif can_prefill:
-            result = self._prefill_step()
-            self._consecutive_prefill_steps += 1
         else:
             return None
 
@@ -215,6 +203,8 @@ class Scheduler:
         )
 
     def _prefill_step(self) -> SchedulerStep:
+        # 只快照本轮开始时的 Decode；刚完成 Prompt 的请求下轮才输入首个输出 token。
+        decoding = list(self._running.values())
         self._admit_prefill_requests()
         entries = list(self._prefilling.values())
         selected = entries[: min(len(entries), self.config.prefill_token_budget)]
@@ -228,9 +218,13 @@ class Scheduler:
             chunks.append((entry, start, end))
             remaining_budget -= end - start
 
-        request_ids = tuple(entry.request.request_id for entry, _, _ in chunks)
-        append_lengths = tuple(end - start for _, start, end in chunks)
-        packed_tokens = []
+        decode_ids = tuple(entry.request.request_id for entry in decoding)
+        request_ids = decode_ids + tuple(entry.request.request_id for entry, _, _ in chunks)
+        append_lengths = (1,) * len(decoding) + tuple(end - start for _, start, end in chunks)
+        packed_tokens = [entry.request.last_output_token_id for entry in decoding]
+        if decoding:
+            for request_id, length in zip(decode_ids, self.cache.lengths(decode_ids)):
+                self.cache.ensure_capacity(request_id, length + 1)
         for entry, start, end in chunks:
             request_id = entry.request.request_id
             # reservation 是容量承诺；这里才从 free pages 取物理页并写入请求页表。
@@ -250,11 +244,18 @@ class Scheduler:
         )
         self._model_forwards += 1
         input_token_count = sum(append_lengths)
-        self._prefill_input_tokens += input_token_count
+        self._prefill_input_tokens += input_token_count - len(decoding)
         self._max_prefill_batch_size = max(self._max_prefill_batch_size, len(chunks))
+        self._max_decode_batch_size = max(self._max_decode_batch_size, len(decoding))
 
         outputs = []
-        packed_offset = 0
+        for index, entry in enumerate(decoding):
+            event = entry.request.record_token(int(logits[index].argmax().item()))
+            outputs.append(event)
+            if event.finished:
+                self._running.pop(entry.request.request_id)
+                self._release(entry, finished=True)
+        packed_offset = len(decoding)
         for entry, start, end in chunks:
             request = entry.request
             request_id = request.request_id
@@ -280,7 +281,7 @@ class Scheduler:
 
         return SchedulerStep(
             index=self._step_index,
-            phase="prefill",
+            phase="mixed" if decoding else "prefill",
             request_ids=request_ids,
             input_tokens=input_token_count,
             outputs=tuple(outputs),

@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -198,7 +199,14 @@ class AttentionBackendTest(unittest.TestCase):
             for request_id, prompt in ragged_prompts.items():
                 scheduler.add(make_request(request_id, prompt, max_new_tokens=3))
         expected = drain_scheduler(reference_ragged)
-        actual = drain_scheduler(flash_ragged)
+        with patch.object(flash, "forward_packed", wraps=flash.forward_packed) as packed:
+            actual = drain_scheduler(flash_ragged)
+        self.assertTrue(
+            any(
+                1 in call.kwargs["append_lengths"] and max(call.kwargs["append_lengths"]) > 1
+                for call in packed.call_args_list
+            )
+        )
         self.assertEqual(actual, expected)
         self.assertEqual(flash_ragged.stats.max_prefill_batch_size, 3)
 

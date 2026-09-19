@@ -10,6 +10,44 @@ from tests.helpers import drain_scheduler, make_model, make_request, reference_g
 
 class SchedulerTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_mixed_batch_advances_decode_and_handles_prefill_abort(self) -> None:
+        model = make_model()
+        scheduler = Scheduler(
+            model,
+            SchedulerConfig(prefill_token_budget=2, num_pages=24, page_size=2),
+        )
+        request = make_request("decode", [1, 2], 4)
+        scheduler.add(request)
+        tokens = [scheduler.step().outputs[0].token_id]
+        scheduler.add(make_request("long", [3, 4, 5, 6, 7, 8, 9], 2))
+        scheduler.add(make_request("cancel", [10, 11, 12, 13], 2))
+        before = scheduler.prefill_input_tokens
+        forwards = scheduler.stats.model_forwards
+        with patch.object(model, "forward_packed", wraps=model.forward_packed) as forward:
+            step = scheduler.step()
+        self.assertEqual(step.phase, "mixed")
+        self.assertEqual(step.request_ids, ("decode", "long", "cancel"))
+        self.assertEqual(forward.call_count, 1)
+        self.assertEqual(forward.call_args.kwargs["append_lengths"], (1, 1, 1))
+        self.assertEqual(step.input_tokens, 3)
+        self.assertEqual(scheduler.prefill_input_tokens - before, 2)
+        self.assertEqual(scheduler.stats.model_forwards - forwards, 1)
+        tokens.extend(event.token_id for event in step.outputs if event.request_id == "decode")
+        scheduler.abort("cancel")
+        scheduler.check_integrity()
+        while request.state is not RequestState.FINISHED:
+            step = scheduler.step()
+            self.assertEqual(step.phase, "mixed")
+            self.assertLessEqual(step.input_tokens, 3)
+            self.assertIn("decode", [event.request_id for event in step.outputs])
+            tokens.extend(event.token_id for event in step.outputs if event.request_id == "decode")
+            scheduler.check_integrity()
+        self.assertEqual(tokens, reference_generate(model, [1, 2], 4))
+        outputs = drain_scheduler(scheduler)
+        self.assertEqual(outputs["long"], reference_generate(model, [3, 4, 5, 6, 7, 8, 9], 2))
+        self.assertEqual(scheduler.cache.allocator.stats.request_count, 0)
+
+    @torch.inference_mode()
     def test_batching_matches_reference_and_reuses_prefix(self) -> None:
         model = make_model(seed=808)
         scheduler = Scheduler(
@@ -67,7 +105,6 @@ class SchedulerTest(unittest.TestCase):
             SchedulerConfig(
                 max_running_requests=4,
                 prefill_token_budget=16,
-                max_consecutive_prefill_steps=1,
                 num_pages=24,
                 page_size=2,
             ),
@@ -79,7 +116,7 @@ class SchedulerTest(unittest.TestCase):
 
         phases = [scheduler.step().phase for _ in range(5)]
 
-        self.assertEqual(phases, ["decode", "prefill", "decode", "decode", "decode"])
+        self.assertEqual(phases, ["mixed", "decode", "decode", "decode", "decode"])
         self.assertEqual(scheduler.stats.max_prefill_batch_size, 3)
 
     @torch.inference_mode()
@@ -125,11 +162,11 @@ class SchedulerTest(unittest.TestCase):
 
         second = make_request("second", [1, 2, 3, 4, 5, 6, 7, 8], 2)
         scheduler.add(second)
-        self.assertEqual(scheduler.step().phase, "decode")
         second_prefill = scheduler.step()
 
-        self.assertEqual(second_prefill.request_ids, ("second",))
-        self.assertEqual(second_prefill.input_tokens, 2)
+        self.assertEqual(second_prefill.phase, "mixed")
+        self.assertEqual(second_prefill.request_ids, ("first", "second"))
+        self.assertEqual(second_prefill.input_tokens, 3)
         self.assertEqual(first.state, RequestState.DECODING)
         drain_scheduler(scheduler)
         scheduler.check_integrity()

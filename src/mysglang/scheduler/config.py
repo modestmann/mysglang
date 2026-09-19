@@ -8,9 +8,8 @@ class SchedulerConfig:
     """Configuration for the single paged + radix scheduler."""
 
     max_running_requests: int = 8
+    # 仅限制新增 Prefill token；混合 batch 另为每个 Decode 请求保留一个 token。
     prefill_token_budget: int = 64
-    # Prefill 和 Decode 都有工作时，连续 Prefill 的上限。
-    max_consecutive_prefill_steps: int = 1
     num_pages: int = 64
     page_size: int = 4
 
@@ -18,7 +17,6 @@ class SchedulerConfig:
         for name in (
             "max_running_requests",
             "prefill_token_budget",
-            "max_consecutive_prefill_steps",
             "num_pages",
             "page_size",
         ):
