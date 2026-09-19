@@ -9,14 +9,21 @@ from .core import (
     RequestState,
     SamplingParams,
 )
-from .modeling import TinyCausalLM
+from .modeling import (
+    AttentionBackend,
+    FlashAttentionBackend,
+    TinyCausalLM,
+    TorchAttentionBackend,
+)
 from .scheduler import Scheduler, SchedulerConfig, SchedulerStats, SchedulerStep
 from .serving import GenerationChunk, GenerationService, GenerationSession
 from .tokenizer import ByteTokenizer
 
 __all__ = [
+    "AttentionBackend",
     "ByteTokenizer",
     "FinishReason",
+    "FlashAttentionBackend",
     "GenerationChunk",
     "GenerationService",
     "GenerationSession",
@@ -31,4 +38,5 @@ __all__ = [
     "SchedulerStats",
     "SchedulerStep",
     "TinyCausalLM",
+    "TorchAttentionBackend",
 ]

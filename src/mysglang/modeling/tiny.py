@@ -7,6 +7,8 @@ from torch import nn
 from mysglang.cache import PagedKVCache
 from mysglang.config import ModelConfig
 
+from .attention import AttentionBackend, TorchAttentionBackend
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float) -> None:
@@ -54,14 +56,16 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     return x * cos + rotated * sin
 
 
-def _repeat_kv(x: torch.Tensor, repeats: int) -> torch.Tensor:
-    return x if repeats == 1 else x.repeat_interleave(repeats, dim=1)
-
-
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: ModelConfig, layer_idx: int) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        layer_idx: int,
+        backend: AttentionBackend,
+    ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
+        self.backend = backend
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
@@ -93,22 +97,13 @@ class CausalSelfAttention(nn.Module):
         key = self.k_norm(split_heads(self.k_proj(x), self.num_kv_heads))
         value = split_heads(self.v_proj(x), self.num_kv_heads)
         query, key = self.rope(query, key, positions)
-        attention_mask = None
-        if kv_cache is not None:
-            if cache_request_ids is None:
-                raise ValueError("cache_request_ids are required with PagedKVCache")
-            key, value, attention_mask = kv_cache.append(
-                self.layer_idx, key, value, cache_request_ids
-            )
-
-        repeats = self.num_heads // self.num_kv_heads
-        key, value = _repeat_kv(key, repeats), _repeat_kv(value, repeats)
-        output = F.scaled_dot_product_attention(
+        output = self.backend.forward(
             query,
             key,
             value,
-            attn_mask=attention_mask,
-            is_causal=kv_cache is None,
+            layer_idx=self.layer_idx,
+            kv_cache=kv_cache,
+            request_ids=cache_request_ids,
         )
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         return self.o_proj(output)
@@ -126,10 +121,15 @@ class GatedMLP(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: ModelConfig, layer_idx: int) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        layer_idx: int,
+        backend: AttentionBackend,
+    ) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = CausalSelfAttention(config, layer_idx)
+        self.self_attn = CausalSelfAttention(config, layer_idx, backend)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = GatedMLP(config)
 
@@ -152,17 +152,27 @@ class DecoderLayer(nn.Module):
 class TinyCausalLM(nn.Module):
     """A tiny dense Qwen3 model used for Hugging Face correctness alignment."""
 
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        attention_backend: AttentionBackend | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
+        self.attention_backend = attention_backend or TorchAttentionBackend()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            DecoderLayer(config, layer_idx) for layer_idx in range(config.num_layers)
+            DecoderLayer(config, layer_idx, self.attention_backend)
+            for layer_idx in range(config.num_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
+
+    def validate_cache(self, cache: PagedKVCache) -> None:
+        self.attention_backend.validate_cache(cache)
 
     def forward(
         self,

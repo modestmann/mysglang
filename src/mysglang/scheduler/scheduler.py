@@ -66,6 +66,7 @@ class Scheduler:
             dtype=parameter.dtype,
             device=parameter.device,
         )
+        self.model.validate_cache(self.cache)
         self._device = parameter.device
         self._waiting: deque[_Entry] = deque()
         self._prefilling: _Entry | None = None

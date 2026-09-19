@@ -6,6 +6,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - continuous batching、chunked prefill 和动态 decode batch；
 - 共享 Paged KV Cache、容量预留和 OOM-safe admission；
 - page-aligned Radix prefix cache、引用保护与按需淘汰；
+- 可切换的 PyTorch reference / FlashAttention 2 attention backend；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
 
 项目目前仍以 tiny dense Qwen3 和 PyTorch reference attention 验证调度、缓存与模型语义，不是完整的生产推理框架。下一阶段才会接入真实模型、GPU attention backend 和正式评测。
@@ -24,6 +25,7 @@ HTTP / caller
             -> Scheduler
                  -> paged + radix cache
                  -> TinyCausalLM
+                      -> AttentionBackend
   <- IncrementalOutput / SSE
 ```
 
@@ -60,7 +62,7 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 
 - 只有随机 tiny dense 模型，尚未加载真实 Qwen3/Qwen3 MoE 权重；
 - 只实现 greedy sampling，byte tokenizer 也只是协议测试替身；
-- PyTorch attention 会 gather/pad 离散历史 K/V，没有直接消费物理 page pool；
+- 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
 - Scheduler 为单进程同步 step，Prefill 尚未组成高效的 ragged multi-request batch；
 - 没有 CUDA Graph、Tensor Parallel、多进程容错或正式 benchmark client；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。

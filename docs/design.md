@@ -56,7 +56,8 @@ HTTP session
 | PageAllocator | 物理页、页表、容量承诺 | attention 数学计算 |
 | RadixPrefixCache | token 前缀到 cached pages 的索引和保护 | 存放 K/V tensor |
 | PagedKVCache | 真正的逐层 K/V pool | 请求到达与输出传输 |
-| Model | hidden states、attention、logits | 请求生命周期 |
+| Model | hidden states、Q/K/V 投影和 logits | 请求生命周期 |
+| AttentionBackend | KV 写入、attention kernel 与输出 | 调度策略和请求生命周期 |
 
 ## 2. 实现演进与当前地位
 
@@ -130,7 +131,18 @@ KV address    = pool[layer, 1, 2]
 - 页表长度不能超过 `shared prefix pages + private reserved pages`；
 - waiting 请求尚未拥有页，完成或 abort 后不遗留页表。
 
-当前 PyTorch reference attention 会按页表 gather 有效 K/V，再 pad 和构造 mask。它用于语义对齐，不代表 paging 的最终性能；高性能 backend 应直接读取物理 pool、block tables 和各请求长度。
+### AttentionBackend
+
+模型只负责生成已经过 RoPE 的 Q/K/V，具体怎样写入 KV、读取历史并执行 attention 由 backend 决定：
+
+| Backend | KV 路径 | 用途 |
+|---|---|---|
+| `TorchAttentionBackend` | Python 写页，再 gather/pad 成 dense tensor，调用 PyTorch SDPA | CPU 测试与 correctness oracle |
+| `FlashAttentionBackend` | `flash_attn_with_kvcache` 直接读取物理 pool 和 block table，并在同一 kernel 中追加 K/V | CUDA Prefill/Decode |
+
+`PagedKVCache.prepare_append()` 负责一次 append 的公共验证并生成 `cache_seqlens`、block table 与物理 pool view。Torch oracle 通过 `stage_append()` 写页并 gather；FA2 kernel 则直接写物理 pool。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
+
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。当前 metadata 仍按层从 Python 构造；后续应把同一 forward 共用的 block table/lengths 提升为 batch metadata，避免重复创建。
 
 ## 5. Radix prefix cache
 

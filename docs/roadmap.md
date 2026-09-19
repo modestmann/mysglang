@@ -24,10 +24,12 @@
 
 当前保证：主入口没有隐式后端选择；未消费 session 不进入 Scheduler；正常完成、异常和 abort 后页面与 handle 全部回收。
 
-## 2. GPU AttentionBackend
+## 2. GPU AttentionBackend（第一阶段已完成）
 
-- 把 PyTorch gather/pad 路径定义为 reference backend；
-- 接入 FlashAttention 2，让 Prefill/Decode 直接消费物理 KV pool、block tables 和 sequence lengths；
+- 已把 PyTorch gather/pad 路径收敛为 `TorchAttentionBackend` correctness oracle；
+- 已接入 `FlashAttentionBackend`，Prefill/Decode 直接消费物理 KV pool、block tables 和 sequence lengths；
+- 已在 RTX 4060 Laptop（SM89）验证 uncached、paged Prefill 和变长 batch Decode 与 reference 对齐；
+- 下一步把逐层创建的 block table/length tensors 提升为可复用 batch metadata；
 - 支持 ragged multi-request Prefill，并保留 chunked prefill；
 - 在 metadata 稳定后，为固定 Decode bucket 加入 CUDA Graph；
 - GPU 不支持所选 kernel 时给出明确错误或显式回退。

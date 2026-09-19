@@ -26,6 +26,20 @@ class PageAllocatorStats:
     cached_pages: int = 0
 
 
+@dataclass(frozen=True)
+class PagedKVAppendPlan:
+    """One layer's immutable metadata for appending and attending to paged KV."""
+
+    layer_idx: int
+    request_ids: tuple[str, ...]
+    starts: tuple[int, ...]
+    ends: tuple[int, ...]
+    key_cache: torch.Tensor
+    value_cache: torch.Tensor
+    block_table: torch.Tensor
+    cache_seqlens: torch.Tensor
+
+
 @dataclass
 class _Allocation:
     page_table: list[int]
@@ -368,6 +382,60 @@ class PagedKVCache:
         value: torch.Tensor,
         request_ids: Sequence[str],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        plan = self.prepare_append(layer_idx, key, value, request_ids)
+        result = self.stage_append(plan, key, value)
+        self.commit_append(plan)
+        return result
+
+    def stage_append(
+        self,
+        plan: PagedKVAppendPlan,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Write K/V and gather the reference tensors without advancing lengths."""
+        chunk_length = key.size(2)
+
+        with torch.no_grad():
+            for batch_index, (request_id, start, end) in enumerate(
+                zip(plan.request_ids, plan.starts, plan.ends)
+            ):
+                page_table = self.allocator.page_table(request_id)
+                for chunk_index, position in enumerate(range(start, end)):
+                    page = page_table[position // self.page_size]
+                    offset = position % self.page_size
+                    plan.key_cache[page, offset].copy_(key[batch_index, :, chunk_index])
+                    plan.value_cache[page, offset].copy_(value[batch_index, :, chunk_index])
+
+        max_end = max(plan.ends)
+        keys = key.new_zeros((len(plan.request_ids), key.size(1), max_end, key.size(3)))
+        values = value.new_zeros(keys.shape)
+        flat_keys = plan.key_cache.view(-1, key.size(1), key.size(3))
+        flat_values = plan.value_cache.view(-1, key.size(1), key.size(3))
+        for batch_index, (request_id, length) in enumerate(zip(plan.request_ids, plan.ends)):
+            table = self.allocator.page_table(request_id)
+            physical_indices = [
+                table[position // self.page_size] * self.page_size + position % self.page_size
+                for position in range(length)
+            ]
+            index = torch.tensor(physical_indices, dtype=torch.long, device=key.device)
+            keys[batch_index, :, :length] = flat_keys.index_select(0, index).transpose(0, 1)
+            values[batch_index, :, :length] = flat_values.index_select(0, index).transpose(0, 1)
+
+        query_positions = torch.tensor(plan.starts, device=key.device)[:, None]
+        query_positions = query_positions + torch.arange(chunk_length, device=key.device)[None, :]
+        key_positions = torch.arange(max_end, device=key.device)
+        attention_mask = key_positions[None, None, :] <= query_positions[:, :, None]
+        return keys, values, attention_mask[:, None, :, :]
+
+    def prepare_append(
+        self,
+        layer_idx: int,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        request_ids: Sequence[str],
+    ) -> PagedKVAppendPlan:
+        """Validate one append and build GPU-friendly block-table metadata."""
         self._validate_layer(layer_idx)
         requests = self._validate_requests(request_ids)
         if len(set(requests)) != len(requests):
@@ -387,6 +455,8 @@ class PagedKVCache:
             raise ValueError("key/value device must match the cache device")
         if key.dtype != self._keys.dtype or value.dtype != self._values.dtype:
             raise ValueError("key/value dtype must match the cache dtype")
+        if key.size(2) == 0:
+            raise ValueError("key/value sequence must not be empty")
 
         starts = self.layer_lengths(layer_idx, requests)
         chunk_length = key.size(2)
@@ -399,36 +469,40 @@ class PagedKVCache:
                     f"{allocated_tokens} were allocated"
                 )
 
-        with torch.no_grad():
-            for batch_index, (request_id, start, end) in enumerate(zip(requests, starts, ends)):
-                page_table = self.allocator.page_table(request_id)
-                for chunk_index, position in enumerate(range(start, end)):
-                    page = page_table[position // self.page_size]
-                    offset = position % self.page_size
-                    self._keys[layer_idx, page, offset].copy_(key[batch_index, :, chunk_index])
-                    self._values[layer_idx, page, offset].copy_(value[batch_index, :, chunk_index])
-                self._lengths[request_id][layer_idx] = end
+        tables = tuple(self.allocator.page_table(request_id) for request_id in requests)
+        max_blocks = max(map(len, tables))
+        block_table = torch.full(
+            (len(requests), max_blocks),
+            -1,
+            dtype=torch.int32,
+            device=key.device,
+        )
+        for batch_index, table in enumerate(tables):
+            block_table[batch_index, : len(table)] = torch.tensor(
+                table,
+                dtype=torch.int32,
+                device=key.device,
+            )
 
-        max_end = max(ends)
-        keys = key.new_zeros((len(requests), key.size(1), max_end, key.size(3)))
-        values = value.new_zeros(keys.shape)
-        flat_keys = self._keys[layer_idx].view(-1, key.size(1), key.size(3))
-        flat_values = self._values[layer_idx].view(-1, key.size(1), key.size(3))
-        for batch_index, (request_id, length) in enumerate(zip(requests, ends)):
-            table = self.allocator.page_table(request_id)
-            physical_indices = [
-                table[position // self.page_size] * self.page_size + position % self.page_size
-                for position in range(length)
-            ]
-            index = torch.tensor(physical_indices, dtype=torch.long, device=key.device)
-            keys[batch_index, :, :length] = flat_keys.index_select(0, index).transpose(0, 1)
-            values[batch_index, :, :length] = flat_values.index_select(0, index).transpose(0, 1)
+        return PagedKVAppendPlan(
+            layer_idx=layer_idx,
+            request_ids=requests,
+            starts=starts,
+            ends=ends,
+            key_cache=self._keys[layer_idx],
+            value_cache=self._values[layer_idx],
+            block_table=block_table,
+            cache_seqlens=torch.tensor(starts, dtype=torch.int32, device=key.device),
+        )
 
-        query_positions = torch.tensor(starts, device=key.device)[:, None]
-        query_positions = query_positions + torch.arange(chunk_length, device=key.device)[None, :]
-        key_positions = torch.arange(max_end, device=key.device)
-        attention_mask = key_positions[None, None, :] <= query_positions[:, :, None]
-        return keys, values, attention_mask[:, None, :, :]
+    def commit_append(self, plan: PagedKVAppendPlan) -> None:
+        """Advance logical lengths after a backend has written every K/V item."""
+        self._validate_layer(plan.layer_idx)
+        requests = self._validate_requests(plan.request_ids)
+        if self.layer_lengths(plan.layer_idx, requests) != plan.starts:
+            raise RuntimeError("paged KV append plan is stale")
+        for request_id, end in zip(requests, plan.ends):
+            self._lengths[request_id][plan.layer_idx] = end
 
     def release_request(self, request_id: str) -> tuple[int, ...]:
         self._validate_request(request_id)
