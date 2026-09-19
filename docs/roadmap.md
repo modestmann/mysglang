@@ -32,6 +32,7 @@
 - 已用 `PagedKVBatch` 把 block table、旧长度和追加范围提升为一次 forward 构造、所有层复用的 metadata；
 - 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FA2 paged-varlen kernel 直接读取历史页；
 - 已实现 Prefill/Decode 混合 forward：已有 Decode 每轮推进一个 token，Prefill 在独立 token budget 内打包；
+- 已按采样位置裁剪最终 hidden states，只为 Decode 和已完成 Prompt 的末尾 token 计算 logits；未完成 Prefill 仅更新 KV；
 - 下一步复用 metadata buffer，并为固定 Decode bucket 加入 CUDA Graph；
 - GPU 不支持所选 kernel 时给出明确错误或显式回退。
 

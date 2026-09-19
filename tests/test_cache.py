@@ -50,6 +50,53 @@ class PageAllocatorTest(unittest.TestCase):
 
 
 class PagedKVCacheTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_selected_logits_skip_head_but_preserve_all_kv(self) -> None:
+        self.cache.reserve_request("a", 8)
+        self.cache.reserve_request("b", 8)
+        self.cache.ensure_capacity("a", 2)
+        self.cache.ensure_capacity("b", 3)
+        with patch.object(self.model.lm_head, "forward", wraps=self.model.lm_head.forward) as head:
+            empty = self.model.forward_packed(
+                torch.tensor([1, 2, 3, 4, 5]),
+                kv_cache=self.cache,
+                cache_request_ids=("a", "b"),
+                append_lengths=(2, 3),
+                logits_indices=(),
+            )
+            head.assert_not_called()
+        self.assertEqual(empty.shape, (0, self.model.config.vocab_size))
+        self.assertEqual(self.cache.lengths(("a", "b")), (2, 3))
+        self.cache.ensure_capacity("a", 4)
+        self.cache.ensure_capacity("b", 4)
+        with patch.object(self.model.lm_head, "forward", wraps=self.model.lm_head.forward) as head:
+            actual = self.model.forward_packed(
+                torch.tensor([6, 7, 8]),
+                kv_cache=self.cache,
+                cache_request_ids=("a", "b"),
+                append_lengths=(2, 1),
+                logits_indices=(2, 1),
+            )
+            self.assertEqual(head.call_args.args[0].shape[0], 2)
+        expected = torch.stack(
+            (
+                self.model(torch.tensor([[3, 4, 5, 8]]))[0, -1],
+                self.model(torch.tensor([[1, 2, 6, 7]]))[0, -1],
+            )
+        )
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        before = self.cache.lengths(("a", "b"))
+        with self.assertRaisesRegex(ValueError, "logits_indices"):
+            self.model.forward_packed(
+                torch.tensor([9, 10]),
+                kv_cache=self.cache,
+                cache_request_ids=("a", "b"),
+                append_lengths=(1, 1),
+                logits_indices=(2,),
+            )
+        self.assertEqual(self.cache.lengths(("a", "b")), before)
+        self.cache.check_integrity()
+
     def setUp(self) -> None:
         self.model = make_model(seed=2468)
         parameter = next(self.model.parameters())

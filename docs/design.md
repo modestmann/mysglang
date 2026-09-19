@@ -135,6 +135,8 @@ KV address    = pool[layer, 1, 2]
 
 ### AttentionBackend
 
+采样位置由 Scheduler 在 forward 前确定：所有 Decode token，以及本轮完成 Prompt 的请求的末尾 token。packed 模型完成所有 Transformer 层后，先按 `logits_indices` 选择 hidden rows，再执行最终 RMSNorm 和 LM head，返回 `[采样位置数, vocab]`。中间 Prefill chunk 仍完整更新 KV；若全 batch 没有采样位置，则跳过最终 norm/head，返回 `[0, vocab]`。省略该参数仍返回完整 logits，供数值对齐使用。这减少词表投影工作，不减少 Attention 或 MLP 的 token 数。
+
 模型只负责生成已经过 RoPE 的 Q/K/V，具体怎样写入 KV、读取历史并执行 attention 由 backend 决定：
 
 | Backend | KV 路径 | 用途 |

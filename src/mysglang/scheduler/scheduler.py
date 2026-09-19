@@ -236,11 +236,19 @@ class Scheduler:
             dtype=torch.long,
             device=self._device,
         )
+        # Decode 每个位置都采样；Prefill 仅在完整 Prompt 结束时采样。
+        logits_indices = list(range(len(decoding)))
+        packed_offset = len(decoding)
+        for entry, start, end in chunks:
+            packed_offset += end - start
+            if end == len(entry.request.prompt_token_ids):
+                logits_indices.append(packed_offset - 1)
         logits = self.model.forward_packed(
             input_ids,
             kv_cache=self.cache,
             cache_request_ids=request_ids,
             append_lengths=append_lengths,
+            logits_indices=tuple(logits_indices),
         )
         self._model_forwards += 1
         input_token_count = sum(append_lengths)
@@ -255,11 +263,10 @@ class Scheduler:
             if event.finished:
                 self._running.pop(entry.request.request_id)
                 self._release(entry, finished=True)
-        packed_offset = len(decoding)
+        logits_offset = len(decoding)
         for entry, start, end in chunks:
             request = entry.request
             request_id = request.request_id
-            chunk_length = end - start
             entry.prefill_offset = end
             self._prefilling.pop(request_id)
 
@@ -267,7 +274,8 @@ class Scheduler:
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
                 self.cache.publish_prefix(request_id, request.prompt_token_ids)
                 request.start_decode()
-                next_token = int(logits[packed_offset + chunk_length - 1].argmax().item())
+                next_token = int(logits[logits_offset].argmax().item())
+                logits_offset += 1
                 event = request.record_token(next_token)
                 outputs.append(event)
                 if event.finished:
@@ -277,7 +285,6 @@ class Scheduler:
             else:
                 # 被选中但尚未完成的长请求移到队尾，避免小 budget 下独占 Prefill。
                 self._prefilling[request_id] = entry
-            packed_offset += chunk_length
 
         return SchedulerStep(
             index=self._step_index,

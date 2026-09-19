@@ -233,14 +233,22 @@ class TinyCausalLM(nn.Module):
         kv_cache: PagedKVCache,
         cache_request_ids: tuple[str, ...],
         append_lengths: tuple[int, ...],
+        logits_indices: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
-        """Run flattened variable-length chunks without padding query tokens."""
+        """Run packed chunks; optionally project only selected token rows to logits."""
         if input_ids.ndim != 1:
             raise ValueError("packed input_ids must have shape [total_tokens]")
         if input_ids.numel() == 0:
             raise ValueError("packed input_ids must not be empty")
         if len(cache_request_ids) != len(append_lengths):
             raise ValueError("request IDs and append lengths must have the same size")
+        if logits_indices is not None and any(
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < input_ids.numel()
+            for index in logits_indices
+        ):
+            raise ValueError("logits_indices must contain valid packed token indices")
 
         cache_batch = kv_cache.prepare_batch(cache_request_ids, append_lengths)
         if input_ids.numel() != cache_batch.total_tokens:
@@ -252,6 +260,7 @@ class TinyCausalLM(nn.Module):
             cache_batch.positions,
             kv_cache,
             cache_batch,
+            logits_indices,
         )
 
     def _forward_tokens(
@@ -260,6 +269,7 @@ class TinyCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
+        logits_indices: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
 
         hidden_states = self.embed_tokens(input_ids)
@@ -270,4 +280,10 @@ class TinyCausalLM(nn.Module):
                 kv_cache,
                 cache_batch,
             )
+        if logits_indices is not None:
+            if not logits_indices:
+                # 中间 Prefill chunk 只需更新 KV，不需要最终 norm / vocab projection。
+                return hidden_states.new_empty((0, self.config.vocab_size), dtype=torch.float32)
+            indices = torch.tensor(logits_indices, dtype=torch.long, device=hidden_states.device)
+            hidden_states = hidden_states.index_select(0, indices)
         return self.lm_head(self.norm(hidden_states)).float()

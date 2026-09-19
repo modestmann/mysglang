@@ -111,8 +111,9 @@ class AttentionBackendTest(unittest.TestCase):
             kv_cache=packed_flash_cache,
             cache_request_ids=packed_request_ids,
             append_lengths=(2, 1),
+            logits_indices=(1, 2),
         )
-        torch.testing.assert_close(actual, expected, atol=3e-3, rtol=3e-3)
+        torch.testing.assert_close(actual, expected[[1, 2]], atol=3e-3, rtol=3e-3)
 
         reference_cache = self._make_cache(reference, config)
         flash_cache = self._make_cache(flash, config)
