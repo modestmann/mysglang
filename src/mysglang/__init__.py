@@ -12,8 +12,11 @@ from .core import (
 from .modeling import (
     AttentionBackend,
     CheckpointLoadReport,
+    ColumnParallelLinear,
     FlashAttentionBackend,
     Qwen3ForCausalLM,
+    RowParallelLinear,
+    TensorParallelContext,
     TorchAttentionBackend,
     load_huggingface_state_dict,
 )
@@ -25,6 +28,7 @@ __all__ = [
     "AttentionBackend",
     "ByteTokenizer",
     "CheckpointLoadReport",
+    "ColumnParallelLinear",
     "FinishReason",
     "FlashAttentionBackend",
     "GenerationChunk",
@@ -35,6 +39,7 @@ __all__ = [
     "InvalidStateTransition",
     "ModelConfig",
     "Qwen3ForCausalLM",
+    "RowParallelLinear",
     "Request",
     "RequestState",
     "SamplingParams",
@@ -43,5 +48,6 @@ __all__ = [
     "SchedulerStats",
     "SchedulerStep",
     "TorchAttentionBackend",
+    "TensorParallelContext",
     "load_huggingface_state_dict",
 ]

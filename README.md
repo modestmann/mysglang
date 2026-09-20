@@ -95,7 +95,8 @@ PYTHONPATH=src python -m mysglang.cli
 - MoE dispatch 当前是正确性优先的逐 expert 实现，尚未替换为 grouped GEMM；
 - 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
 - Scheduler 为单进程同步 step；纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 CUDA Graph，但 ragged/mixed metadata 仍由 Python 构造，尚未做调度/执行重叠；
-- fused 布局已给 TP 留出切分边界，但尚未实现跨 rank collective、Tensor Parallel、多进程容错或正式 benchmark client；
+- 已完成 dense 模型级 TP 切分、checkpoint 分片加载和双进程 Gloo logits 对齐；尚未完成
+  rank worker/batch-plan 广播、云端 NCCL 验收、MoE TP/EP、多进程容错或正式 benchmark client；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 
 这些限制属于明确的后续工作，不应被当前 reference 路径的正确性掩盖。

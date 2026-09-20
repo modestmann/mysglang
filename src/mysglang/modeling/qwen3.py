@@ -10,6 +10,7 @@ from mysglang.cache import PagedKVBatch, PagedKVCache
 from mysglang.config import ModelConfig
 
 from .attention import AttentionBackend, TorchAttentionBackend
+from .parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelContext
 
 
 class RMSNorm(nn.Module):
@@ -77,24 +78,38 @@ class Qwen3Attention(nn.Module):
         config: ModelConfig,
         layer_idx: int,
         backend: AttentionBackend,
+        tensor_parallel: TensorParallelContext,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.backend = backend
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
+        self.tensor_parallel = tensor_parallel
+        self.num_heads = tensor_parallel.local_size(
+            config.num_attention_heads,
+            "num_attention_heads",
+        )
+        self.num_kv_heads = tensor_parallel.local_size(
+            config.num_key_value_heads,
+            "num_key_value_heads",
+        )
         assert config.head_dim is not None
         self.head_dim = config.head_dim
+        self.global_q_size = config.num_attention_heads * self.head_dim
+        self.global_kv_size = config.num_key_value_heads * self.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        # Q/K/V are separate in Hugging Face checkpoints but fused at runtime. Besides
-        # reducing launches, this is the future column-parallel TP boundary.
-        self.qkv_proj = nn.Linear(
+        # Hugging Face stores Q/K/V separately. The loader independently takes this
+        # rank's heads from each tensor, then packs them as [Q_rank, K_rank, V_rank].
+        self.qkv_proj = ColumnParallelLinear(
             config.hidden_size,
-            self.q_size + 2 * self.kv_size,
-            bias=False,
+            (self.global_q_size, self.global_kv_size, self.global_kv_size),
+            tensor_parallel,
         )
-        self.o_proj = nn.Linear(self.q_size, config.hidden_size, bias=False)
+        self.o_proj = RowParallelLinear(
+            self.global_q_size,
+            config.hidden_size,
+            tensor_parallel,
+        )
         self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.rope = RotaryEmbedding(self.head_dim, config.rope_theta)
@@ -145,11 +160,29 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3MLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        tensor_parallel: TensorParallelContext,
+    ) -> None:
         super().__init__()
-        # gate/up share the same input and form the future column-parallel TP boundary.
-        self.gate_up_proj = nn.Linear(hidden_size, 2 * intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.global_intermediate_size = intermediate_size
+        self.intermediate_size = tensor_parallel.local_size(
+            intermediate_size,
+            "intermediate_size",
+        )
+        # As with QKV, gate and up are independently sharded before local fusion.
+        self.gate_up_proj = ColumnParallelLinear(
+            hidden_size,
+            (intermediate_size, intermediate_size),
+            tensor_parallel,
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            tensor_parallel,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
@@ -232,13 +265,14 @@ class Qwen3DecoderLayer(nn.Module):
         config: ModelConfig,
         layer_idx: int,
         backend: AttentionBackend,
+        tensor_parallel: TensorParallelContext,
     ) -> None:
         super().__init__()
-        self.self_attn = Qwen3Attention(config, layer_idx, backend)
+        self.self_attn = Qwen3Attention(config, layer_idx, backend, tensor_parallel)
         self.mlp = (
             Qwen3SparseMoeBlock(config)
             if config.is_sparse_layer(layer_idx)
-            else Qwen3MLP(config.hidden_size, config.intermediate_size)
+            else Qwen3MLP(config.hidden_size, config.intermediate_size, tensor_parallel)
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -267,13 +301,28 @@ class Qwen3ForCausalLM(nn.Module):
         config: ModelConfig,
         *,
         attention_backend: AttentionBackend | None = None,
+        tensor_parallel: TensorParallelContext | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.attention_backend = attention_backend or TorchAttentionBackend()
+        self.tensor_parallel = tensor_parallel or TensorParallelContext()
+        if config.is_moe and self.tensor_parallel.enabled:
+            raise NotImplementedError(
+                "MoE tensor parallelism is not implemented yet; validate dense TP first"
+            )
+        self.kv_cache_num_heads = self.tensor_parallel.local_size(
+            config.num_key_value_heads,
+            "num_key_value_heads",
+        )
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            Qwen3DecoderLayer(config, layer_idx, self.attention_backend)
+            Qwen3DecoderLayer(
+                config,
+                layer_idx,
+                self.attention_backend,
+                self.tensor_parallel,
+            )
             for layer_idx in range(config.num_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -296,6 +345,7 @@ class Qwen3ForCausalLM(nn.Module):
         dtype: torch.dtype | str | None = None,
         device: torch.device | str = "cpu",
         attention_backend: AttentionBackend | None = None,
+        tensor_parallel: TensorParallelContext | None = None,
     ) -> Qwen3ForCausalLM:
         from .loader import load_qwen3_model
 
@@ -304,9 +354,15 @@ class Qwen3ForCausalLM(nn.Module):
             dtype=dtype,
             device=device,
             attention_backend=attention_backend,
+            tensor_parallel=tensor_parallel,
         )
 
     def validate_cache(self, cache: PagedKVCache) -> None:
+        if cache.num_kv_heads != self.kv_cache_num_heads:
+            raise ValueError(
+                "KV cache head count does not match this TP rank: "
+                f"{cache.num_kv_heads} != {self.kv_cache_num_heads}"
+            )
         self.attention_backend.validate_cache(cache)
 
     def forward(

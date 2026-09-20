@@ -362,12 +362,15 @@ class PagedKVCache:
         page_size: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        num_kv_heads: int | None = None,
     ) -> PagedKVCache:
         return cls(
             num_layers=config.num_layers,
             num_pages=num_pages,
             page_size=page_size,
-            num_kv_heads=config.num_key_value_heads,
+            num_kv_heads=(
+                config.num_key_value_heads if num_kv_heads is None else num_kv_heads
+            ),
             head_dim=config.head_dim,
             dtype=dtype,
             device=device,
@@ -384,6 +387,14 @@ class PagedKVCache:
     @property
     def page_size(self) -> int:
         return self._keys.size(2)
+
+    @property
+    def num_kv_heads(self) -> int:
+        return self._keys.size(3)
+
+    @property
+    def head_dim(self) -> int:
+        return self._keys.size(4)
 
     @property
     def memory_bytes(self) -> int:

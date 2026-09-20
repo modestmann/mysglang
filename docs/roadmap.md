@@ -66,11 +66,21 @@
 
 ## 5. 多进程与 Tensor Parallel
 
+- 已建立模型级 TP 基线：`TensorParallelContext`、column/row-parallel linear、
+  fused QKV 与 gate/up 的逐段切分，以及 rank-local KV head/cache 布局；
+- checkpoint loader 在加载时直接取得当前 rank 的 Q/K/V、gate/up 与 row-parallel
+  输入分片，不先在 GPU 上构造完整权重；
+- 已用两个 Gloo 进程验证小型 dense Qwen3 的 TP=2 logits 与 TP=1 对齐；embedding
+  和 LM head 暂时复制，以先固定 attention/MLP 的通信边界；
 - 分离前端/tokenizer、Scheduler/Engine 和 detokenizer 进程；
 - 实现 column/row parallel linear、vocab parallel embedding/head；
 - 控制消息与 NCCL tensor 通信分离；
 - 由 rank 0 广播 batch plan，并对各 rank 顺序做 hash/assertion；
 - 处理 worker 异常、超时和 shutdown，避免静默卡死。
+
+当前单进程 `Scheduler` 会明确拒绝 TP model，避免只有 rank 0 进入 collective 后死锁。
+下一步先完成 rank worker 与 batch-plan 广播，再在云端以 NCCL 验证 TP=2/4；随后扩展
+MoE TP，并在其正确性基线上加入 expert ownership 与 all-to-all EP。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

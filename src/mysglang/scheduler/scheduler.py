@@ -61,6 +61,11 @@ class Scheduler:
     """
 
     def __init__(self, model: Qwen3ForCausalLM, config: SchedulerConfig) -> None:
+        if model.tensor_parallel.enabled:
+            raise RuntimeError(
+                "Tensor-parallel models require the distributed worker runtime; "
+                "the single-process Scheduler cannot drive collectives safely"
+            )
         self.model = model.eval()
         self.config = config
         parameter = next(model.parameters())
@@ -70,6 +75,7 @@ class Scheduler:
             page_size=config.page_size,
             dtype=parameter.dtype,
             device=parameter.device,
+            num_kv_heads=model.kv_cache_num_heads,
         )
         self.model.validate_cache(self.cache)
         self._device = parameter.device

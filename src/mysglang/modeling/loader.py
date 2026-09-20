@@ -11,6 +11,7 @@ import torch
 from mysglang.config import ModelConfig
 
 from .attention import AttentionBackend
+from .parallel import RowParallelLinear, TensorParallelContext
 
 _EXPERT_WEIGHT = re.compile(
     r"^(layers\.\d+\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
@@ -27,8 +28,9 @@ class CheckpointLoadReport:
 @dataclass(frozen=True)
 class _Assignment:
     target_name: str
-    index: object
+    target_index: object
     part: str
+    source_index: object = Ellipsis
 
 
 def resolve_dtype(dtype: torch.dtype | str | None, config: ModelConfig) -> torch.dtype:
@@ -57,6 +59,7 @@ def load_qwen3_model(
     dtype: torch.dtype | str | None,
     device: torch.device | str,
     attention_backend: AttentionBackend | None,
+    tensor_parallel: TensorParallelContext | None,
 ):
     from .qwen3 import Qwen3ForCausalLM
 
@@ -67,7 +70,11 @@ def load_qwen3_model(
     # Meta construction avoids first allocating a full fp32 model. ``to(dtype)`` only
     # changes meta tensor descriptors; ``to_empty`` then allocates the final storage once.
     with torch.device("meta"):
-        model = Qwen3ForCausalLM(config, attention_backend=attention_backend)
+        model = Qwen3ForCausalLM(
+            config,
+            attention_backend=attention_backend,
+            tensor_parallel=tensor_parallel,
+        )
     model.to(dtype=parameter_dtype)
     model.to_empty(device=device)
     model.tie_weights()
@@ -157,6 +164,15 @@ def _map_weight(model, source_name: str) -> _Assignment | None:
     parameters = _parameters(model)
     name = source_name.removeprefix("model.")
     if name in parameters:
+        module_path, _, parameter_name = name.rpartition(".")
+        module = model.get_submodule(module_path) if module_path else model
+        if parameter_name == "weight" and isinstance(module, RowParallelLinear):
+            return _Assignment(
+                name,
+                Ellipsis,
+                "full",
+                (slice(None), module.source_columns),
+            )
         return _Assignment(name, Ellipsis, "full")
 
     for projection, part in (("q_proj", "q"), ("k_proj", "k"), ("v_proj", "v")):
@@ -167,16 +183,15 @@ def _map_weight(model, source_name: str) -> _Assignment | None:
                 return None
             module_path = name.removesuffix(suffix)
             attention = model.get_submodule(module_path)
-            offsets = {
-                "q": (0, attention.q_size),
-                "k": (attention.q_size, attention.q_size + attention.kv_size),
-                "v": (
-                    attention.q_size + attention.kv_size,
-                    attention.q_size + 2 * attention.kv_size,
-                ),
-            }
-            start, end = offsets[part]
-            return _Assignment(target_name, (slice(start, end), slice(None)), part)
+            part_index = {"q": 0, "k": 1, "v": 2}[part]
+            target_rows = attention.qkv_proj.local_segment(part_index)
+            source_rows = attention.qkv_proj.source_segment(part_index)
+            return _Assignment(
+                target_name,
+                (target_rows, slice(None)),
+                part,
+                (source_rows, slice(None)),
+            )
 
     expert = _EXPERT_WEIGHT.match(name)
     if expert:
@@ -204,13 +219,13 @@ def _map_weight(model, source_name: str) -> _Assignment | None:
             target_name = name.removesuffix(suffix) + ".gate_up_proj.weight"
             if target_name not in parameters:
                 return None
-            target = parameters[target_name]
-            intermediate_size = target.size(0) // 2
-            offset = 0 if projection == "gate_proj" else intermediate_size
+            mlp = model.get_submodule(name.removesuffix(suffix))
+            part_index = 0 if projection == "gate_proj" else 1
             return _Assignment(
                 target_name,
-                (slice(offset, offset + intermediate_size), slice(None)),
+                (mlp.gate_up_proj.local_segment(part_index), slice(None)),
                 part,
+                (mlp.gate_up_proj.source_segment(part_index), slice(None)),
             )
     return None
 
@@ -226,13 +241,14 @@ def _copy_assignment(
     if marker in parts:
         raise ValueError(f"checkpoint initializes {assignment.target_name} part twice")
     target = _parameters(model)[assignment.target_name]
-    target_view = target[assignment.index]
-    if tuple(target_view.shape) != tuple(source.shape):
+    target_view = target[assignment.target_index]
+    source_view = source[assignment.source_index]
+    if tuple(target_view.shape) != tuple(source_view.shape):
         raise ValueError(
             f"shape mismatch for {assignment.target_name}: "
-            f"checkpoint {tuple(source.shape)} != model {tuple(target_view.shape)}"
+            f"checkpoint shard {tuple(source_view.shape)} != model {tuple(target_view.shape)}"
         )
-    target_view.copy_(source.to(device=target.device, dtype=target.dtype))
+    target_view.copy_(source_view.to(device=target.device, dtype=target.dtype))
     coverage[assignment.target_name] = coverage.get(assignment.target_name, 0) + target_view.numel()
     parts.add(marker)
 
