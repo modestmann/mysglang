@@ -1,0 +1,48 @@
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	NODE	NODE	SYS	0-35,72-107	0		N/A
+GPU1	NODE	 X 	NODE	SYS	0-35,72-107	0		N/A
+GPU2	NODE	NODE	 X 	SYS	0-35,72-107	0		N/A
+GPU3	SYS	SYS	SYS	 X 	36-71,108-143	1		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+P2P_READ
+ 	[4mGPU0	GPU1	GPU2	GPU3	[0m
+ GPU0	X	CNS	CNS	CNS	
+ GPU1	CNS	X	CNS	CNS	
+ GPU2	CNS	CNS	X	CNS	
+ GPU3	CNS	CNS	CNS	X	
+
+Legend:
+
+  X    = Self
+  OK   = Status Ok
+  CNS  = Chipset not supported
+  GNS  = GPU not supported
+  TNS  = Topology not supported
+  NS   = Not supported
+  U    = Unknown
+P2P_WRITE
+ 	[4mGPU0	GPU1	GPU2	GPU3	[0m
+ GPU0	X	CNS	CNS	CNS	
+ GPU1	CNS	X	CNS	CNS	
+ GPU2	CNS	CNS	X	CNS	
+ GPU3	CNS	CNS	CNS	X	
+
+Legend:
+
+  X    = Self
+  OK   = Status Ok
+  CNS  = Chipset not supported
+  GNS  = GPU not supported
+  TNS  = Topology not supported
+  NS   = Not supported
+  U    = Unknown
+[[None, False, False, False], [False, None, False, False], [False, False, None, False], [False, False, False, None]]

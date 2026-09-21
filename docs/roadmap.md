@@ -51,7 +51,8 @@
   all-reduce 合并；已在云端加载真实 Qwen3-30B-A3B；
 - 已保留 naive/sorted 基线，并增加 padded-batched grouped GEMM 以及 token ownership +
   variable all-to-all dispatch/combine reference；两者已通过单进程 oracle、Gloo TP=2
-  forward 与 continuous batching，待 CUDA A/B 决定是否继续实现 Triton fused kernel；
+  forward 与 continuous batching；四卡 CUDA A/B 显示 grouped 慢 2.6%～8.2%，all-to-all
+  又慢 20.5%～30.2%，因此保持 sorted 默认，下一步只评估无 padding Triton fused kernel；
 - 保留 `naive` dispatch 基线并默认使用 sorted dispatch：一次筛选本 rank assignments 后
   按 expert 分组；SafeTensors 对 packed experts 和 TP projection 直接读取 rank-local slice。
 
@@ -95,8 +96,8 @@
 
 当前单进程 `Scheduler` 仍会拒绝 TP model；TP 必须通过 `TensorParallelScheduler` 让所有
 rank 同步进入 collective。TP CUDA Graph 和跨 rank 故障恢复尚未实现。真实
-Qwen3-30B-A3B 的四卡显存、token 与吞吐已完成第一轮验收；下一步在同一实例对照
-sorted、grouped 和 all-to-all 的 CUDA token、吞吐、延迟、显存与 NCCL transport。
+Qwen3-30B-A3B 的四卡显存、token、吞吐及 sorted/grouped/all-to-all A/B 均已完成。
+不再扩展 TP×EP mesh；若继续优化 MoE，优先实现 offsets/counts 驱动的无 padding kernel。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

@@ -58,4 +58,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 .venv/bin/python benchmarks/validate_transformers.p
 已有实测报告：
 
 - [Qwen3-0.6B：RTX 4090 ×4](results/2026-09-21-4090x4/report.md)；
-- [Qwen3-30B-A3B：RTX 4090 ×4 MoE](results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
+- [Qwen3-30B-A3B：RTX 4090 ×4 MoE](results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)；
+- [Qwen3-30B-A3B：grouped 与 all-to-all A/B](results/2026-09-22-qwen3-30b-a3b-grouped-a2a-4090x4/report.md)。

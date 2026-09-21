@@ -94,3 +94,8 @@ all-to-all 日志。解释结果时按以下两组差分：
 
 当前 Attention 仍为 TP=4，所以 all-to-all 返回 source rank 后必须 all-gather 完整 token
 hidden；这不是独立 TP×EP mesh，也不能把它描述为省掉了所有 MoE 层尾通信。
+
+本轮已于 2026-09-22 完成，结果见
+[grouped / all-to-all A/B 报告](results/2026-09-22-qwen3-30b-a3b-grouped-a2a-4090x4/report.md)。
+当前 padded grouped 比 sorted 慢 2.6%～8.2%，all-to-all 又比 grouped 慢
+20.5%～30.2%；因此保持 sorted 默认，并将后续计算优化收敛到无 padding fused kernel。

@@ -466,7 +466,8 @@ align_down(len(prompt) - 1, page_size)
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
 - CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
 - dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
-  新增 grouped/all-to-all 路径尚待 CUDA A/B，vocab parallel、worker 超时与故障恢复尚未完成；
+  grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
+  vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。
