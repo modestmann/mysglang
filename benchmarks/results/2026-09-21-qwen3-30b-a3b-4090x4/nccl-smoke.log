@@ -1,0 +1,148 @@
+W0921 19:12:46.818000 40487 torch/distributed/run.py:793] 
+W0921 19:12:46.818000 40487 torch/distributed/run.py:793] *****************************************
+W0921 19:12:46.818000 40487 torch/distributed/run.py:793] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0921 19:12:46.818000 40487 torch/distributed/run.py:793] *****************************************
+[TP rank 1/4] Loading /root/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 0/4] Loading /root/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+PxAx9b:40537:40537 [0] NCCL INFO Bootstrap : Using eth0:172.17.0.15<0>
+PxAx9b:40537:40537 [0] NCCL INFO NET/Plugin: No plugin found (libnccl-net.so)
+PxAx9b:40537:40537 [0] NCCL INFO NET/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-net.so
+PxAx9b:40537:40537 [0] NCCL INFO NET/Plugin: Using internal network plugin.
+PxAx9b:40537:40537 [0] NCCL INFO cudaDriverVersion 12070
+NCCL version 2.21.5+cuda12.4
+PxAx9b:40537:40652 [0] NCCL INFO NET/IB : No device found.
+PxAx9b:40537:40652 [0] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.15<0>
+PxAx9b:40537:40652 [0] NCCL INFO Using non-device net plugin version 0
+PxAx9b:40537:40652 [0] NCCL INFO Using network Socket
+PxAx9b:40539:40539 [2] NCCL INFO cudaDriverVersion 12070
+PxAx9b:40539:40539 [2] NCCL INFO Bootstrap : Using eth0:172.17.0.15<0>
+PxAx9b:40540:40540 [3] NCCL INFO cudaDriverVersion 12070
+PxAx9b:40540:40540 [3] NCCL INFO Bootstrap : Using eth0:172.17.0.15<0>
+PxAx9b:40539:40539 [2] NCCL INFO NET/Plugin: No plugin found (libnccl-net.so)
+PxAx9b:40539:40539 [2] NCCL INFO NET/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-net.so
+PxAx9b:40539:40539 [2] NCCL INFO NET/Plugin: Using internal network plugin.
+PxAx9b:40540:40540 [3] NCCL INFO NET/Plugin: No plugin found (libnccl-net.so)
+PxAx9b:40540:40540 [3] NCCL INFO NET/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-net.so
+PxAx9b:40540:40540 [3] NCCL INFO NET/Plugin: Using internal network plugin.
+PxAx9b:40538:40538 [1] NCCL INFO cudaDriverVersion 12070
+PxAx9b:40538:40538 [1] NCCL INFO Bootstrap : Using eth0:172.17.0.15<0>
+PxAx9b:40538:40538 [1] NCCL INFO NET/Plugin: No plugin found (libnccl-net.so)
+PxAx9b:40538:40538 [1] NCCL INFO NET/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-net.so
+PxAx9b:40538:40538 [1] NCCL INFO NET/Plugin: Using internal network plugin.
+PxAx9b:40540:40654 [3] NCCL INFO NET/IB : No device found.
+PxAx9b:40540:40654 [3] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.15<0>
+PxAx9b:40540:40654 [3] NCCL INFO Using non-device net plugin version 0
+PxAx9b:40540:40654 [3] NCCL INFO Using network Socket
+PxAx9b:40539:40653 [2] NCCL INFO NET/IB : No device found.
+PxAx9b:40539:40653 [2] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.15<0>
+PxAx9b:40539:40653 [2] NCCL INFO Using non-device net plugin version 0
+PxAx9b:40539:40653 [2] NCCL INFO Using network Socket
+PxAx9b:40538:40655 [1] NCCL INFO NET/IB : No device found.
+PxAx9b:40538:40655 [1] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.15<0>
+PxAx9b:40538:40655 [1] NCCL INFO Using non-device net plugin version 0
+PxAx9b:40538:40655 [1] NCCL INFO Using network Socket
+PxAx9b:40538:40655 [1] NCCL INFO ncclCommInitRank comm 0x24fa2940 rank 1 nranks 4 cudaDev 1 nvmlDev 1 busId 66000 commId 0x988255f4b2ef2190 - Init START
+PxAx9b:40540:40654 [3] NCCL INFO ncclCommInitRank comm 0x24806340 rank 3 nranks 4 cudaDev 3 nvmlDev 3 busId 99000 commId 0x988255f4b2ef2190 - Init START
+PxAx9b:40539:40653 [2] NCCL INFO ncclCommInitRank comm 0x242b7cf0 rank 2 nranks 4 cudaDev 2 nvmlDev 2 busId 98000 commId 0x988255f4b2ef2190 - Init START
+PxAx9b:40537:40652 [0] NCCL INFO ncclCommInitRank comm 0x28e42ab0 rank 0 nranks 4 cudaDev 0 nvmlDev 0 busId 32000 commId 0x988255f4b2ef2190 - Init START
+PxAx9b:40537:40652 [0] NCCL INFO Setting affinity for GPU 0 to ff00,0000000f,c0000000
+PxAx9b:40538:40655 [1] NCCL INFO Setting affinity for GPU 1 to ff00,0000000f,c0000000
+PxAx9b:40540:40654 [3] NCCL INFO Setting affinity for GPU 3 to ff,fffc00f0,00000000
+PxAx9b:40540:40654 [3] NCCL INFO NVLS multicast support is not available on dev 3
+PxAx9b:40537:40652 [0] NCCL INFO NVLS multicast support is not available on dev 0
+PxAx9b:40539:40653 [2] NCCL INFO Setting affinity for GPU 2 to ff,fffc00f0,00000000
+PxAx9b:40539:40653 [2] NCCL INFO NVLS multicast support is not available on dev 2
+PxAx9b:40538:40655 [1] NCCL INFO NVLS multicast support is not available on dev 1
+PxAx9b:40538:40655 [1] NCCL INFO comm 0x24fa2940 rank 1 nRanks 4 nNodes 1 localRanks 4 localRank 1 MNNVL 0
+PxAx9b:40539:40653 [2] NCCL INFO comm 0x242b7cf0 rank 2 nRanks 4 nNodes 1 localRanks 4 localRank 2 MNNVL 0
+PxAx9b:40537:40652 [0] NCCL INFO comm 0x28e42ab0 rank 0 nRanks 4 nNodes 1 localRanks 4 localRank 0 MNNVL 0
+PxAx9b:40539:40653 [2] NCCL INFO Trees [0] 3/-1/-1->2->1 [1] 3/-1/-1->2->1
+PxAx9b:40538:40655 [1] NCCL INFO Trees [0] 2/-1/-1->1->0 [1] 2/-1/-1->1->0
+PxAx9b:40539:40653 [2] NCCL INFO P2P Chunksize set to 131072
+PxAx9b:40538:40655 [1] NCCL INFO P2P Chunksize set to 131072
+PxAx9b:40537:40652 [0] NCCL INFO Channel 00/02 :    0   1   2   3
+PxAx9b:40537:40652 [0] NCCL INFO Channel 01/02 :    0   1   2   3
+PxAx9b:40537:40652 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] 1/-1/-1->0->-1
+PxAx9b:40537:40652 [0] NCCL INFO P2P Chunksize set to 131072
+PxAx9b:40540:40654 [3] NCCL INFO comm 0x24806340 rank 3 nRanks 4 nNodes 1 localRanks 4 localRank 3 MNNVL 0
+PxAx9b:40540:40654 [3] NCCL INFO Trees [0] -1/-1/-1->3->2 [1] -1/-1/-1->3->2
+PxAx9b:40540:40654 [3] NCCL INFO P2P Chunksize set to 131072
+PxAx9b:40539:40653 [2] NCCL INFO Channel 00 : 2[2] -> 3[3] via SHM/direct/direct
+PxAx9b:40539:40653 [2] NCCL INFO Channel 01 : 2[2] -> 3[3] via SHM/direct/direct
+PxAx9b:40540:40654 [3] NCCL INFO Channel 00 : 3[3] -> 0[0] via SHM/direct/direct
+PxAx9b:40538:40655 [1] NCCL INFO Channel 00 : 1[1] -> 2[2] via SHM/direct/direct
+PxAx9b:40537:40652 [0] NCCL INFO Channel 00 : 0[0] -> 1[1] via SHM/direct/direct
+PxAx9b:40540:40654 [3] NCCL INFO Channel 01 : 3[3] -> 0[0] via SHM/direct/direct
+PxAx9b:40538:40655 [1] NCCL INFO Channel 01 : 1[1] -> 2[2] via SHM/direct/direct
+PxAx9b:40537:40652 [0] NCCL INFO Channel 01 : 0[0] -> 1[1] via SHM/direct/direct
+PxAx9b:40538:40655 [1] NCCL INFO Connected all rings
+PxAx9b:40537:40652 [0] NCCL INFO Connected all rings
+PxAx9b:40539:40653 [2] NCCL INFO Connected all rings
+PxAx9b:40540:40654 [3] NCCL INFO Connected all rings
+PxAx9b:40540:40654 [3] NCCL INFO Channel 00 : 3[3] -> 2[2] via SHM/direct/direct
+PxAx9b:40540:40654 [3] NCCL INFO Channel 01 : 3[3] -> 2[2] via SHM/direct/direct
+PxAx9b:40539:40653 [2] NCCL INFO Channel 00 : 2[2] -> 1[1] via SHM/direct/direct
+PxAx9b:40539:40653 [2] NCCL INFO Channel 01 : 2[2] -> 1[1] via SHM/direct/direct
+PxAx9b:40538:40655 [1] NCCL INFO Channel 00 : 1[1] -> 0[0] via SHM/direct/direct
+PxAx9b:40538:40655 [1] NCCL INFO Channel 01 : 1[1] -> 0[0] via SHM/direct/direct
+PxAx9b:40537:40652 [0] NCCL INFO Connected all trees
+PxAx9b:40540:40654 [3] NCCL INFO Connected all trees
+PxAx9b:40540:40654 [3] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+PxAx9b:40540:40654 [3] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+PxAx9b:40539:40653 [2] NCCL INFO Connected all trees
+PxAx9b:40539:40653 [2] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+PxAx9b:40539:40653 [2] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+PxAx9b:40538:40655 [1] NCCL INFO Connected all trees
+PxAx9b:40538:40655 [1] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+PxAx9b:40537:40652 [0] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+PxAx9b:40538:40655 [1] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+PxAx9b:40537:40652 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+PxAx9b:40538:40655 [1] NCCL INFO TUNER/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-tuner.so
+PxAx9b:40537:40652 [0] NCCL INFO TUNER/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-tuner.so
+PxAx9b:40538:40655 [1] NCCL INFO TUNER/Plugin: Using internal tuner plugin.
+PxAx9b:40540:40654 [3] NCCL INFO TUNER/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-tuner.so
+PxAx9b:40537:40652 [0] NCCL INFO TUNER/Plugin: Using internal tuner plugin.
+PxAx9b:40539:40653 [2] NCCL INFO TUNER/Plugin: Plugin load returned 2 : libnccl-net.so: cannot open shared object file: No such file or directory : when loading libnccl-tuner.so
+PxAx9b:40538:40655 [1] NCCL INFO ncclCommInitRank comm 0x24fa2940 rank 1 nranks 4 cudaDev 1 nvmlDev 1 busId 66000 commId 0x988255f4b2ef2190 - Init COMPLETE
+PxAx9b:40540:40654 [3] NCCL INFO TUNER/Plugin: Using internal tuner plugin.
+PxAx9b:40537:40652 [0] NCCL INFO ncclCommInitRank comm 0x28e42ab0 rank 0 nranks 4 cudaDev 0 nvmlDev 0 busId 32000 commId 0x988255f4b2ef2190 - Init COMPLETE
+PxAx9b:40539:40653 [2] NCCL INFO TUNER/Plugin: Using internal tuner plugin.
+PxAx9b:40540:40654 [3] NCCL INFO ncclCommInitRank comm 0x24806340 rank 3 nranks 4 cudaDev 3 nvmlDev 3 busId 99000 commId 0x988255f4b2ef2190 - Init COMPLETE
+PxAx9b:40539:40653 [2] NCCL INFO ncclCommInitRank comm 0x242b7cf0 rank 2 nranks 4 cudaDev 2 nvmlDev 2 busId 98000 commId 0x988255f4b2ef2190 - Init COMPLETE
+{
+  "output": "benchmarks/results/qwen3-30b-a3b-4090x4.jsonl",
+  "elapsed_s": 0.19992664083838463,
+  "requests_per_s": 5.001834651983041,
+  "output_tokens": 1,
+  "output_tokens_per_s": 5.001834651983041,
+  "ttft_ms": {
+    "mean": 199.7577752918005,
+    "p50": 199.7577752918005,
+    "p95": 199.7577752918005,
+    "max": 199.7577752918005
+  },
+  "itl_ms": {
+    "mean": null,
+    "p50": null,
+    "p95": null,
+    "max": null
+  },
+  "e2e_ms": {
+    "mean": 199.7577752918005,
+    "p50": 199.7577752918005,
+    "p95": 199.7577752918005,
+    "max": 199.7577752918005
+  },
+  "rank0_peak_torch_allocated_mib": 15861.58056640625,
+  "rank0_peak_torch_reserved_mib": 16112.0
+}
+PxAx9b:40539:40657 [2] NCCL INFO [Service thread] Connection closed by localRank 2
+PxAx9b:40538:40656 [1] NCCL INFO [Service thread] Connection closed by localRank 1
+PxAx9b:40540:40662 [3] NCCL INFO [Service thread] Connection closed by localRank 3
+PxAx9b:40537:40660 [0] NCCL INFO [Service thread] Connection closed by localRank 0
+PxAx9b:40540:40682 [3] NCCL INFO comm 0x24806340 rank 3 nranks 4 cudaDev 3 busId 99000 - Abort COMPLETE
+PxAx9b:40539:40680 [2] NCCL INFO comm 0x242b7cf0 rank 2 nranks 4 cudaDev 2 busId 98000 - Abort COMPLETE
+PxAx9b:40537:40683 [0] NCCL INFO comm 0x28e42ab0 rank 0 nranks 4 cudaDev 0 busId 32000 - Abort COMPLETE
+PxAx9b:40538:40681 [1] NCCL INFO comm 0x24fa2940 rank 1 nranks 4 cudaDev 1 busId 66000 - Abort COMPLETE

@@ -48,12 +48,12 @@
 - 已实现 Qwen3MoE router、softmax/top-k、可选概率归一化和 expert dispatch，并与 Transformers 小 MoE logits 对齐；
 - 已增加 temperature、top-k、top-p 和独立 per-request seed；随机结果不受 continuous batch 组合影响；
 - 已实现 replicated-token expert 分片：每个 rank 只加载/计算自己的 experts，输出以
-  all-reduce 合并；待云端加载真实 checkpoint，并用 all-to-all + grouped GEMM/Triton
-  替换正确性优先的通信与 expert loop。
+  all-reduce 合并；已在云端加载真实 Qwen3-30B-A3B，后续用 all-to-all 与
+  grouped GEMM/Triton 分别替换正确性优先的通信和 expert loop，并保留 A/B 基线。
 - 保留 `naive` dispatch 基线并默认使用 sorted dispatch：一次筛选本 rank assignments 后
   按 expert 分组；SafeTensors 对 packed experts 和 TP projection 直接读取 rank-local slice。
 
-本地 dense 验收已完成：与 Transformers 对齐 layer/logits/greedy token，真实 checkpoint 完成单请求和并发 smoke test。MoE 的小模型 oracle 已完成，真实 checkpoint 验收等待云端显存。具体型号不写死在架构中。
+本地 dense 验收已完成：与 Transformers 对齐 layer/logits/greedy token，真实 checkpoint 完成单请求和并发 smoke test。MoE 的小模型 oracle及真实 Qwen3-30B-A3B 四卡 token/显存/性能验收均已完成。具体型号不写死在架构中。
 
 ## 4. Scheduler 与 Cache 进阶
 
@@ -92,9 +92,9 @@
 - 处理 worker 异常、超时和 shutdown，避免静默卡死。
 
 当前单进程 `Scheduler` 仍会拒绝 TP model；TP 必须通过 `TensorParallelScheduler` 让所有
-rank 同步进入 collective。TP CUDA Graph 和跨 rank 故障恢复尚未实现。下一步在云端
-验证真实 Qwen3-30B-A3B 的四卡显存、token 与吞吐；随后把 replicated-token all-reduce
-基线替换为 token ownership + all-to-all EP，并加入 grouped GEMM。
+rank 同步进入 collective。TP CUDA Graph 和跨 rank 故障恢复尚未实现。真实
+Qwen3-30B-A3B 的四卡显存、token 与吞吐已完成验收；下一步把 replicated-token
+all-reduce 基线与 token ownership + all-to-all EP 对照，并加入 grouped GEMM。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

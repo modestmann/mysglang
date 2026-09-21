@@ -39,4 +39,20 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python benchmarks/validate_transformers.py \
   --output benchmarks/results/transformers-alignment.json
 ```
 
-已有实测报告见 [2026-09-21-4090x4/report.md](results/2026-09-21-4090x4/report.md)。
+checkpoint 单卡放不下时可安装 Accelerate，并让 Transformers 按完整 layer 分布到多卡：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 .venv/bin/python benchmarks/validate_transformers.py \
+  --model /root/models/Qwen3-30B-A3B \
+  --results benchmarks/results/qwen3-30b-a3b-4090x4.jsonl \
+  --names moe-tp4-sorted-smoke moe-tp4-naive-smoke \
+  --prompt-tokens 32 --max-new-tokens 4 --device-map balanced \
+  --output benchmarks/results/qwen3-30b-a3b-transformers-alignment.json
+```
+
+这里的 Transformers `device_map` 只是低吞吐正确性 oracle，不作为 TP/EP 性能对照。
+
+已有实测报告：
+
+- [Qwen3-0.6B：RTX 4090 ×4](results/2026-09-21-4090x4/report.md)；
+- [Qwen3-30B-A3B：RTX 4090 ×4 MoE](results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。

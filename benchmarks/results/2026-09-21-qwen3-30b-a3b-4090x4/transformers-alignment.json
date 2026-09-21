@@ -1,0 +1,36 @@
+{
+  "model": "/root/models/Qwen3-30B-A3B",
+  "dtype": "bfloat16",
+  "device_map": "balanced",
+  "prompt_tokens": 32,
+  "max_new_tokens": 4,
+  "transformers_token_ids": [
+    1773,
+    220,
+    105444,
+    107420
+  ],
+  "comparisons": {
+    "moe-tp4-sorted-smoke": {
+      "exact_match": true,
+      "first_mismatch_index": null,
+      "mysglang_token_ids": [
+        1773,
+        220,
+        105444,
+        107420
+      ]
+    },
+    "moe-tp4-naive-smoke": {
+      "exact_match": true,
+      "first_mismatch_index": null,
+      "mysglang_token_ids": [
+        1773,
+        220,
+        105444,
+        107420
+      ]
+    }
+  },
+  "all_exact_match": true
+}

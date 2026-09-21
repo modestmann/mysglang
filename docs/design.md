@@ -240,7 +240,7 @@ decoder 每次重新解码累计 token，并维护已经发送的稳定前缀 `s
 
 Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。
 
-本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 MoE checkpoint 留待云端验证。
+本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 Qwen3-30B-A3B 也已在 4×RTX 4090 上完成 BF16/FA2 加载、Transformers greedy token oracle 和 naive/sorted 三轮性能验收，详见 [实测报告](../benchmarks/results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
 
 ## 6. Tensor Parallel 与多进程调度
 
@@ -287,6 +287,47 @@ all-gather 拼接。Column 和 Row 之间的 Attention/SwiGLU 激活始终保持
 只按本 rank 的 KV heads 分配，显存随 TP 缩小；page-table 逻辑布局则必须跨 rank 一致。
 MoE 在同一进程组上组合 Attention TP 与 replicated-token expert 分片；vocabulary-parallel
 embedding/head、独立 TP/EP group 和 all-to-all token dispatch 尚未实现。
+
+### 拓扑感知的 TP/EP 分组
+
+并行度首先由“模型能否放入显存”决定，满足容量后再按通信临界程度映射到硬件：
+
+| 并行方式 | 推理时的主要通信 | 分组原则 |
+|---|---|---|
+| TP | 每层 activation all-reduce/all-gather | 使用最小可行 TP，并限制在 NVLink 或最近的 PCIe P2P 域 |
+| EP | MoE token dispatch/combine；当前基线是 MoE 输出 all-reduce | 同样偏好高带宽域；单卡放多个 expert 时优先 grouped GEMM，通常不再切分单个 expert |
+| DP | 各副本处理独立请求 | 模型副本放得下时最适合跨慢链路扩吞吐，生成临界路径不需要逐 token collective |
+| PP | stage 边界 point-to-point | 模型无法复制时可跨较慢域，但要以足够 batch/并发摊薄 pipeline bubble |
+
+TP 的 collective 出现在每个 dense block，通常是最需要留在最快互联中的维度；EP 的
+all-to-all 也可能很重，尤其 top-k 大或 token hidden 较宽时，因此不能只按“expert 权重
+放得下”决定 EP group。若 TP 和 EP 不能同时留在最快域，先以最小 TP 满足 dense 权重和
+KV 显存，再实测 EP；不要为了用满 GPU 盲目增大 TP。NVIDIA 的性能指南同样建议 TP 和 EP
+尽量限制在高带宽域，且 Expert Tensor Parallel 通常设为 1，多个 local experts 依靠
+grouped GEMM 提高利用率：
+
+- [Megatron Bridge Performance Guide](https://docs.nvidia.com/nemo/megatron-bridge/nightly/performance-guide.html)
+- [Megatron Core MoE Guide](https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/user-guide/features/moe.html)
+
+部署前不能只看 GPU 型号，应按以下顺序验证实际机器：
+
+1. `nvidia-smi topo -m` 查看 NVLink、PIX/PXB/PHB/NODE/SYS 和 NUMA affinity；
+2. `nvidia-smi topo -p2p p` 与 `torch.cuda.can_device_access_peer()` 检查 CUDA P2P；
+3. 用 `NCCL_DEBUG=INFO` 做一次短 collective，确认实际选中 `P2P`、`SHM` 还是 `NET`；
+4. 对候选 rank group 实测 all-reduce/all-to-all，而不是只凭拓扑标签排序；
+5. 将各 rank 的 CPU 和 host-memory allocation 绑定到 GPU 所在 NUMA node。
+
+若 CUDA P2P 不可用，NCCL 会使用 SHM，通过 host memory 在 GPU 之间中转；此时同 NUMA
+或同 PHB 的理论优势可能被中转路径掩盖，必须以 collective 实测为准。不要把
+`NCCL_P2P_LEVEL`、`NCCL_SHM_DISABLE` 等调试变量固化为默认配置，NCCL 文档明确提醒强制
+覆盖自动选择可能降低性能或破坏兼容性：
+
+- [NCCL GPU troubleshooting](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/troubleshooting/gpu_troubleshooting.html)
+- [NCCL environment variables](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html)
+
+当前实现的 Attention TP 和 replicated-token expert shard 复用同一个 process group，尚无
+独立 TP/EP mesh 可供重排。未来加入 token ownership 和 all-to-all EP 时，应让 runtime
+显式接收 TP/EP rank lists，而不是假设连续 device ID 总属于同一高速互联域。
 
 ### Scheduler 控制面
 
@@ -404,7 +445,7 @@ align_down(len(prompt) - 1, page_size)
 
 ## 9. 当前限制
 
-- 本地只有 dense Qwen3-0.6B checkpoint；真实 MoE checkpoint 尚待云端验证；
+- 本地只有 dense Qwen3-0.6B checkpoint；真实 Qwen3-30B-A3B 已在云端完成一次可复现验收，原始结果已归档；
 - MoE 已有 expert ownership 分片，但仍使用 replicated-token all-reduce 和逐 expert loop，
   尚无 all-to-all、grouped GEMM 或负载均衡性能优化；
 - TP=1 使用单进程同步 worker；TP>1 目前镜像 Scheduler，尚未分离独立 Engine 进程，也没有 scheduler/forward overlap；
@@ -413,8 +454,8 @@ align_down(len(prompt) - 1, page_size)
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
 - CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
-- dense TP 已在四张 RTX 4090 上通过 NCCL 实测；MoE expert 分片已通过 CPU/Gloo 正确性
-  测试，但真实 checkpoint 的 NCCL 验收、all-to-all EP、vocab parallel、worker 超时与故障恢复尚未完成；
+- dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
+  all-to-all EP、vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。

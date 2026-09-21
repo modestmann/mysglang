@@ -16,6 +16,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--names", nargs="+", required=True)
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--device-map",
+        choices=("auto", "balanced", "balanced_low_0", "sequential"),
+        help="let Transformers/Accelerate place a checkpoint that does not fit one GPU",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -34,14 +39,19 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     prompt_ids = _fixed_prompt_ids(tokenizer, args.prompt_tokens)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        local_files_only=True,
-        dtype=torch.bfloat16,
-    ).to("cuda")
+    load_kwargs = {
+        "local_files_only": True,
+        "dtype": torch.bfloat16,
+    }
+    if args.device_map is not None:
+        load_kwargs["device_map"] = args.device_map
+    model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
+    if args.device_map is None:
+        model = model.to("cuda")
     model.eval()
 
-    current = torch.tensor([prompt_ids], device="cuda")
+    input_device = model.get_input_embeddings().weight.device
+    current = torch.tensor([prompt_ids], device=input_device)
     past_key_values = None
     reference: list[int] = []
     with torch.inference_mode():
@@ -53,7 +63,7 @@ def main() -> None:
             )
             next_token = outputs.logits[:, -1].argmax(dim=-1)
             reference.append(int(next_token.item()))
-            current = next_token[:, None]
+            current = next_token.to(input_device)[:, None]
             past_key_values = outputs.past_key_values
 
     rows = [json.loads(line) for line in args.results.read_text().splitlines()]
@@ -74,6 +84,7 @@ def main() -> None:
     result = {
         "model": str(args.model.resolve()),
         "dtype": "bfloat16",
+        "device_map": args.device_map,
         "prompt_tokens": len(prompt_ids),
         "max_new_tokens": args.max_new_tokens,
         "transformers_token_ids": reference,

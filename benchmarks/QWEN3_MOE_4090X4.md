@@ -1,5 +1,9 @@
 # Qwen3-30B-A3B 四卡验收清单
 
+本清单已于 2026-09-21 在 4×RTX 4090 实例完成。完整原始数据、拓扑/NCCL 证据、
+Transformers token oracle 和三轮 A/B 汇总见
+[实测报告](results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
+
 目标模型：`/root/models/Qwen3-30B-A3B`；硬件：4×RTX 4090 24 GiB。不要只看进程能启动，
 必须同时保存 token 对齐、每 rank 显存、NCCL 活跃情况和性能原始数据。
 
@@ -55,3 +59,13 @@ Transformers 四卡分配的 BF16 greedy oracle；在 oracle 完成前只能称�
 当前 replicated-token EP 已避免重复 expert 计算：每个 expert 只存在于一个 rank。它复制
 的是 hidden/router 工作，并以完整 hidden all-reduce 合并结果；在当前 Attention TP 的
 replicated hidden 布局下，直接换 all-to-all 未必更省通信，不能脱离实测强行替换。
+
+## 5. 本次验收摘要
+
+- Transformers、naive 和 sorted smoke 的 4 个 greedy token 完全一致；正式矩阵的
+  9 组对应输出也全部一致；
+- sorted 相对 naive 的 output throughput 中位数：单请求 Decode `+45.7%`，并发
+  Decode `+48.6%`，长 Prefill `+22.2%`；
+- 四卡峰值显存 16,718～16,722 MiB；
+- 所有 GPU pair 的 CUDA P2P 均不可用，NCCL ring 实际走 SHM；因此下一步 all-to-all
+  EP 必须与当前 all-reduce 基线做实机 A/B，不能由拓扑标签推断收益。
