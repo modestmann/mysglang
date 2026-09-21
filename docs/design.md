@@ -224,8 +224,11 @@ expert tensor 和旧版逐 expert gate/up/down tensor：前者读取本 rank 的
 当前是 replicated-token expert parallel：Attention 沿用 TP，all-reduce 后各 rank 都有完整
 hidden；router 在各 rank 复制并得到相同 global expert ID；每个 rank 只计算自己的 experts，
 再 all-reduce 相加为完整 MoE 输出。它不拆分很小的单个 expert，而是把不同 experts 分卡。
-该路径适合作为正确性基线；高性能版本应让各 rank 拥有不同 token，以 all-to-all
-dispatch/combine 并使用 grouped GEMM/Triton。数据依赖的 MoE dispatch 仍走 eager。
+`naive` dispatch 对每个本地 expert 扫描一次 routing 结果；默认 `sorted` 只筛选一次本
+rank assignments，再按 expert 排序分组，减少重复动态 `where`。二者共用相同权重和通信，
+方便做优化前后 A/B。该路径仍是逐 expert GEMM 正确性基线；更高性能版本应结合 token
+ownership、all-to-all dispatch/combine 和 grouped GEMM/Triton。数据依赖的 MoE
+dispatch 仍走 eager。
 
 `HuggingFaceTokenizer` 离线加载 checkpoint tokenizer；chat endpoint 直接调用模型自带的 `apply_chat_template()`，支持 Qwen3 `enable_thinking`，不再手写 role 字符串。增量 decoder 保存生成 token 上下文，只发送稳定、可打印的新后缀，避免单个 token 的 UTF-8 byte fragment 产生乱码。
 

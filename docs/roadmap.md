@@ -50,6 +50,8 @@
 - 已实现 replicated-token expert 分片：每个 rank 只加载/计算自己的 experts，输出以
   all-reduce 合并；待云端加载真实 checkpoint，并用 all-to-all + grouped GEMM/Triton
   替换正确性优先的通信与 expert loop。
+- 保留 `naive` dispatch 基线并默认使用 sorted dispatch：一次筛选本 rank assignments 后
+  按 expert 分组；SafeTensors 对 packed experts 和 TP projection 直接读取 rank-local slice。
 
 本地 dense 验收已完成：与 Transformers 对齐 layer/logits/greedy token，真实 checkpoint 完成单请求和并发 smoke test。MoE 的小模型 oracle 已完成，真实 checkpoint 验收等待云端显存。具体型号不写死在架构中。
 

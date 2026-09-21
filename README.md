@@ -103,6 +103,9 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
 worker loop。`--tensor-parallel-size` 是防止启动参数写错的校验项，不能替代
 `--nproc-per-node`。当前 TP 路径暂不支持 `--cuda-graph`。
 
+MoE 默认使用 `--moe-dispatch sorted`，先把本 rank 的 token-expert assignments 按
+expert 分组，再执行正确性优先的逐 expert GEMM；`--moe-dispatch naive` 保留为性能基线。
+
 ## 当前边界
 
 - 真实 Qwen3MoE 权重的四卡加载、显存和性能尚待云端验证；

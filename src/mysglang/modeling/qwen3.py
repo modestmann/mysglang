@@ -202,10 +202,14 @@ class Qwen3Experts(nn.Module):
         self,
         config: ModelConfig,
         expert_parallel: TensorParallelContext,
+        dispatch_backend: str,
     ) -> None:
         super().__init__()
+        if dispatch_backend not in {"naive", "sorted"}:
+            raise ValueError("MoE dispatch backend must be 'naive' or 'sorted'")
         self.num_experts = config.num_experts
         self.expert_parallel = expert_parallel
+        self.dispatch_backend = dispatch_backend
         self.num_local_experts = expert_parallel.local_size(
             config.num_experts,
             "num_experts",
@@ -249,6 +253,18 @@ class Qwen3Experts(nn.Module):
         selected_experts: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
+        if self.dispatch_backend == "sorted":
+            result = self._forward_sorted(hidden_states, selected_experts, routing_weights)
+        else:
+            result = self._forward_naive(hidden_states, selected_experts, routing_weights)
+        return self.expert_parallel.all_reduce(result)
+
+    def _forward_naive(
+        self,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
         result = torch.zeros_like(hidden_states)
         for local_expert_idx in range(self.num_local_experts):
             global_expert_idx = self.local_expert_start + local_expert_idx
@@ -260,7 +276,52 @@ class Qwen3Experts(nn.Module):
             current = F.linear(F.silu(gate) * up, self.down_proj[local_expert_idx])
             current = current * routing_weights[token_idx, top_k_slot, None]
             result.index_add_(0, token_idx, current.to(result.dtype))
-        return self.expert_parallel.all_reduce(result)
+        return result
+
+    def _forward_sorted(
+        self,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Group this rank's assignments once instead of scanning tokens per expert."""
+        top_k = selected_experts.size(1)
+        flat_experts = selected_experts.reshape(-1)
+        owned = (flat_experts >= self.local_expert_start) & (
+            flat_experts < self.local_expert_end
+        )
+        assignment_indices = torch.where(owned)[0]
+        local_experts = flat_experts[assignment_indices] - self.local_expert_start
+        order = torch.argsort(local_experts)
+        assignment_indices = assignment_indices[order]
+        local_experts = local_experts[order]
+        token_indices = torch.div(assignment_indices, top_k, rounding_mode="floor")
+        top_k_slots = assignment_indices.remainder(top_k)
+        counts = torch.bincount(local_experts, minlength=self.num_local_experts).tolist()
+
+        result = torch.zeros_like(hidden_states)
+        start = 0
+        for local_expert_idx, count in enumerate(counts):
+            end = start + count
+            if count:
+                current_token_indices = token_indices[start:end]
+                current = hidden_states[current_token_indices]
+                gate, up = F.linear(
+                    current,
+                    self.gate_up_proj[local_expert_idx],
+                ).chunk(2, dim=-1)
+                current = F.linear(
+                    F.silu(gate) * up,
+                    self.down_proj[local_expert_idx],
+                )
+                current = current * routing_weights[
+                    current_token_indices,
+                    top_k_slots[start:end],
+                    None,
+                ]
+                result.index_add_(0, current_token_indices, current.to(result.dtype))
+            start = end
+        return result
 
 
 class Qwen3SparseMoeBlock(nn.Module):
@@ -268,12 +329,13 @@ class Qwen3SparseMoeBlock(nn.Module):
         self,
         config: ModelConfig,
         expert_parallel: TensorParallelContext,
+        dispatch_backend: str,
     ) -> None:
         super().__init__()
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        self.experts = Qwen3Experts(config, expert_parallel)
+        self.experts = Qwen3Experts(config, expert_parallel, dispatch_backend)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         original_shape = x.shape
@@ -302,11 +364,12 @@ class Qwen3DecoderLayer(nn.Module):
         layer_idx: int,
         backend: AttentionBackend,
         tensor_parallel: TensorParallelContext,
+        moe_dispatch_backend: str,
     ) -> None:
         super().__init__()
         self.self_attn = Qwen3Attention(config, layer_idx, backend, tensor_parallel)
         self.mlp = (
-            Qwen3SparseMoeBlock(config, tensor_parallel)
+            Qwen3SparseMoeBlock(config, tensor_parallel, moe_dispatch_backend)
             if config.is_sparse_layer(layer_idx)
             else Qwen3MLP(config.hidden_size, config.intermediate_size, tensor_parallel)
         )
@@ -338,6 +401,7 @@ class Qwen3ForCausalLM(nn.Module):
         *,
         attention_backend: AttentionBackend | None = None,
         tensor_parallel: TensorParallelContext | None = None,
+        moe_dispatch_backend: str = "sorted",
     ) -> None:
         super().__init__()
         self.config = config
@@ -354,6 +418,7 @@ class Qwen3ForCausalLM(nn.Module):
                 layer_idx,
                 self.attention_backend,
                 self.tensor_parallel,
+                moe_dispatch_backend,
             )
             for layer_idx in range(config.num_layers)
         )
@@ -378,6 +443,7 @@ class Qwen3ForCausalLM(nn.Module):
         device: torch.device | str = "cpu",
         attention_backend: AttentionBackend | None = None,
         tensor_parallel: TensorParallelContext | None = None,
+        moe_dispatch_backend: str = "sorted",
     ) -> Qwen3ForCausalLM:
         from .loader import load_qwen3_model
 
@@ -387,6 +453,7 @@ class Qwen3ForCausalLM(nn.Module):
             device=device,
             attention_backend=attention_backend,
             tensor_parallel=tensor_parallel,
+            moe_dispatch_backend=moe_dispatch_backend,
         )
 
     def validate_cache(self, cache: PagedKVCache) -> None:

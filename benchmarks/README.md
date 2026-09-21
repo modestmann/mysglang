@@ -26,6 +26,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src \
 token 数。默认使用 greedy 且忽略 EOS，以确保不同实现完成相同工作量。脚本先 warmup，
 清空 prefix cache，再开始计时；CUDA Graph 的捕获也因此不计入正式结果。
 
+MoE 优化前后使用相同命令，只切换 `--moe-dispatch naive` / `sorted`；JSONL 会记录所选
+backend。真实 MoE 还应分别测短 Decode 与长 Prefill，因为两者的 expert 分组规模不同。
+
 `validate_transformers.py` 使用相同输入让 Transformers BF16 逐 token greedy 解码，并把
 token ID 与指定的 mysglang 结果逐项比较：
 
@@ -37,4 +40,3 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python benchmarks/validate_transformers.py \
 ```
 
 已有实测报告见 [2026-09-21-4090x4/report.md](results/2026-09-21-4090x4/report.md)。
-

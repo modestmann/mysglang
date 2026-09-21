@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("benchmarks/results/raw.jsonl"))
     parser.add_argument("--name", default="generation")
     parser.add_argument("--backend", choices=("flash", "torch", "auto"), default="flash")
+    parser.add_argument("--moe-dispatch", choices=("naive", "sorted"), default="sorted")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tensor-parallel-size", type=int)
@@ -235,6 +236,7 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
         "config": {
             "model": str(args.model.resolve()),
             "backend": args.backend,
+            "moe_dispatch": args.moe_dispatch,
             "dtype": args.dtype,
             "world_size": int(os.environ.get("WORLD_SIZE", "1")),
             "concurrency": args.concurrency,

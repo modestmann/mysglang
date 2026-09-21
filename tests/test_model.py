@@ -143,6 +143,15 @@ class ModelRegressionTest(unittest.TestCase):
 
         torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
 
+        naive_model = Qwen3ForCausalLM(config, moe_dispatch_backend="naive").eval()
+        load_huggingface_state_dict(naive_model, reference.state_dict())
+        torch.testing.assert_close(
+            naive_model(input_ids),
+            actual,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
         # Older Qwen3MoE checkpoints store one gate/up/down tensor per expert instead of
         # Transformers 5's packed expert tensors. Both layouts feed the same runtime model.
         legacy_state: dict[str, torch.Tensor] = {}

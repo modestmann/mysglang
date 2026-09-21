@@ -60,6 +60,7 @@ def load_qwen3_model(
     device: torch.device | str,
     attention_backend: AttentionBackend | None,
     tensor_parallel: TensorParallelContext | None,
+    moe_dispatch_backend: str,
 ):
     from .qwen3 import Qwen3ForCausalLM
 
@@ -74,6 +75,7 @@ def load_qwen3_model(
             config,
             attention_backend=attention_backend,
             tensor_parallel=tensor_parallel,
+            moe_dispatch_backend=moe_dispatch_backend,
         )
     model.to(dtype=parameter_dtype)
     model.to_empty(device=device)
@@ -110,12 +112,18 @@ def load_safetensors(model, model_path: str | Path) -> CheckpointLoadReport:
                     # Legacy MoE checkpoints store every expert separately. Do not even
                     # materialize another EP rank's tensor from SafeTensors into host RAM.
                     continue
+                source, source_is_view = _read_safetensors_assignment(
+                    checkpoint,
+                    source_name,
+                    assignment,
+                )
                 _copy_assignment(
                     model,
                     assignment,
-                    checkpoint.get_tensor(source_name),
+                    source,
                     coverage,
                     parts,
+                    source_is_view=source_is_view,
                 )
                 loaded += 1
 
@@ -255,6 +263,8 @@ def _copy_assignment(
     source: torch.Tensor,
     coverage: dict[str, int],
     parts: set[tuple[str, str]],
+    *,
+    source_is_view: bool = False,
 ) -> None:
     if assignment.target_name is None:
         return
@@ -263,7 +273,7 @@ def _copy_assignment(
         raise ValueError(f"checkpoint initializes {assignment.target_name} part twice")
     target = _parameters(model)[assignment.target_name]
     target_view = target[assignment.target_index]
-    source_view = source[assignment.source_index]
+    source_view = source if source_is_view else source[assignment.source_index]
     if tuple(target_view.shape) != tuple(source_view.shape):
         raise ValueError(
             f"shape mismatch for {assignment.target_name}: "
@@ -272,6 +282,18 @@ def _copy_assignment(
     target_view.copy_(source_view.to(device=target.device, dtype=target.dtype))
     coverage[assignment.target_name] = coverage.get(assignment.target_name, 0) + target_view.numel()
     parts.add(marker)
+
+
+def _read_safetensors_assignment(
+    checkpoint,
+    source_name: str,
+    assignment: _Assignment,
+) -> tuple[torch.Tensor, bool]:
+    if assignment.source_index is Ellipsis:
+        return checkpoint.get_tensor(source_name), False
+    # Apply the rank-local slice while reading the memory-mapped file. Host RAM never
+    # holds a full packed expert or global TP projection only to discard most of it.
+    return checkpoint.get_slice(source_name)[assignment.source_index], True
 
 
 def _validate_coverage(model, coverage: dict[str, int]) -> None:
