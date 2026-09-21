@@ -67,6 +67,7 @@ def _distributed_scheduler_worker(
     config: ModelConfig,
     state_dict: dict[str, torch.Tensor],
     expected: dict[str, tuple[int, ...]],
+    moe_dispatch_backend: str,
 ) -> None:
     os.environ["GLOO_SOCKET_IFNAME"] = "lo"
     dist.init_process_group(
@@ -77,7 +78,11 @@ def _distributed_scheduler_worker(
     )
     try:
         tensor_parallel = TensorParallelContext.from_distributed()
-        model = Qwen3ForCausalLM(config, tensor_parallel=tensor_parallel).eval()
+        model = Qwen3ForCausalLM(
+            config,
+            tensor_parallel=tensor_parallel,
+            moe_dispatch_backend=moe_dispatch_backend,
+        ).eval()
         load_huggingface_state_dict(model, state_dict)
         scheduler = TensorParallelScheduler(
             model,
@@ -155,6 +160,7 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                     config,
                     state_dict,
                     expected,
+                    "sorted",
                 ),
                 nprocs=2,
                 join=True,
@@ -197,6 +203,7 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                     config,
                     state_dict,
                     expected,
+                    "all_to_all",
                 ),
                 nprocs=2,
                 join=True,

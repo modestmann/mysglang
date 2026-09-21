@@ -26,8 +26,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src \
 token 数。默认使用 greedy 且忽略 EOS，以确保不同实现完成相同工作量。脚本先 warmup，
 清空 prefix cache，再开始计时；CUDA Graph 的捕获也因此不计入正式结果。
 
-MoE 优化前后使用相同命令，只切换 `--moe-dispatch naive` / `sorted`；JSONL 会记录所选
-backend。真实 MoE 还应分别测短 Decode 与长 Prefill，因为两者的 expert 分组规模不同。
+MoE 优化前后使用相同命令，只切换 `--moe-dispatch naive` / `sorted` / `grouped` /
+`all_to_all`；JSONL 会记录所选 backend。真实 MoE 还应分别测短 Decode 与长 Prefill，
+因为两者的 expert 分组规模、padding 比例和通信/计算比不同。`grouped` 是 portable
+padded-batched `bmm` 路径；`all_to_all` 复用它完成本地 expert 计算，因此比较时应同时
+保留 `sorted`（旧实现）和 `grouped`（相同 all-reduce、不同 kernel）来分离计算与通信收益。
 
 `validate_transformers.py` 使用相同输入让 Transformers BF16 逐 token greedy 解码，并把
 token ID 与指定的 mysglang 结果逐项比较：

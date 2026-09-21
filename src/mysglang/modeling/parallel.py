@@ -82,6 +82,52 @@ class TensorParallelContext:
             dist.all_reduce(tensor, group=self.process_group)
         return tensor
 
+    def all_to_all_variable(
+        self,
+        tensor: torch.Tensor,
+        *,
+        output_split_sizes: list[int],
+        input_split_sizes: list[int],
+    ) -> torch.Tensor:
+        """Exchange variable-size chunks along the first tensor dimension."""
+        if len(input_split_sizes) != self.world_size or len(output_split_sizes) != self.world_size:
+            raise ValueError("all-to-all split sizes must contain one value per rank")
+        if sum(input_split_sizes) != tensor.size(0):
+            raise ValueError("all-to-all input split sizes do not match the tensor")
+        if not self.enabled:
+            if output_split_sizes != input_split_sizes:
+                raise ValueError("single-rank all-to-all split sizes must match")
+            return tensor
+        output = tensor.new_empty((sum(output_split_sizes), *tensor.shape[1:]))
+        dist.all_to_all_single(
+            output,
+            tensor.contiguous(),
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=self.process_group,
+        )
+        return output
+
+    def all_gather_variable_first_dim(
+        self,
+        tensor: torch.Tensor,
+        sizes: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Gather uneven token shards and restore rank-order concatenation on every rank."""
+        if len(sizes) != self.world_size or sizes[self.rank] != tensor.size(0):
+            raise ValueError("all-gather sizes do not match the local token shard")
+        if not self.enabled:
+            return tensor
+        padded_size = max(sizes)
+        padded = tensor.new_zeros((padded_size, *tensor.shape[1:]))
+        padded[: tensor.size(0)] = tensor
+        gathered = [torch.empty_like(padded) for _ in range(self.world_size)]
+        dist.all_gather(gathered, padded, group=self.process_group)
+        return torch.cat(
+            [rank_tensor[:rank_size] for rank_tensor, rank_size in zip(gathered, sizes)],
+            dim=0,
+        )
+
 # ColumnParallelLinear：用分片权重直接产生分片输出。
 # RowParallelLinear：用分片输入和分片权重计算局部贡献，再 all-reduce 求和。
 class ColumnParallelLinear(nn.Module):

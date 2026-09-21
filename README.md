@@ -103,17 +103,21 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
 worker loop。`--tensor-parallel-size` 是防止启动参数写错的校验项，不能替代
 `--nproc-per-node`。当前 TP 路径暂不支持 `--cuda-graph`。
 
-MoE 默认使用 `--moe-dispatch sorted`，先把本 rank 的 token-expert assignments 按
-expert 分组，再执行正确性优先的逐 expert GEMM；`--moe-dispatch naive` 保留为性能基线。
+MoE 提供四条可对照路径：`naive` 为逐 expert 扫描基线；默认 `sorted` 一次筛选并按
+expert 分组，但仍逐 expert GEMM；`grouped` 将活跃 experts 填充成 batched matrices，
+用两次 `bmm` 替代 Python GEMM loop；`all_to_all` 在 grouped 计算外增加 token ownership、
+dispatch/combine all-to-all，并在末尾 all-gather 恢复 Attention TP 所需的 replicated
+hidden。可用 `--moe-dispatch` 显式选择，云端实测前不提前指定新的默认路径。
 
 ## 当前边界
 
 - 真实 Qwen3-30B-A3B 已完成四卡加载、token oracle、显存和 naive/sorted 性能验证；
-- MoE dispatch 当前是正确性优先的逐 expert 实现，尚未替换为 grouped GEMM；
+- MoE 已有 portable padded-batched grouped GEMM 和 token all-to-all reference 路径；
+  尚未用 Triton/fused kernel 消除 padding、layout 和 metadata 开销；
 - 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
 - Scheduler 为单进程同步 step；纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 CUDA Graph，但 ragged/mixed metadata 仍由 Python 构造，尚未做调度/执行重叠；
 - 已完成 dense 模型级 TP、MoE expert 分片、checkpoint 分片加载、rank worker/batch-plan
-  广播和 `torchrun` CLI 启动链；尚待 all-to-all EP、grouped GEMM、多进程容错或正式
+  广播和 `torchrun` CLI 启动链；尚待 grouped/all-to-all CUDA 实测、多进程容错或正式
   benchmark client；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 

@@ -66,7 +66,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default=None)
     parser.add_argument("--backend", choices=("auto", "flash", "torch"), default="auto")
-    parser.add_argument("--moe-dispatch", choices=("naive", "sorted"), default="sorted")
+    parser.add_argument(
+        "--moe-dispatch",
+        choices=("naive", "sorted", "grouped", "all_to_all"),
+        default="sorted",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=0)

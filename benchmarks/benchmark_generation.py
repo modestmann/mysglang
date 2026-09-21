@@ -35,7 +35,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("benchmarks/results/raw.jsonl"))
     parser.add_argument("--name", default="generation")
     parser.add_argument("--backend", choices=("flash", "torch", "auto"), default="flash")
-    parser.add_argument("--moe-dispatch", choices=("naive", "sorted"), default="sorted")
+    parser.add_argument(
+        "--moe-dispatch",
+        choices=("naive", "sorted", "grouped", "all_to_all"),
+        default="sorted",
+    )
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tensor-parallel-size", type=int)

@@ -226,9 +226,20 @@ hidden；router 在各 rank 复制并得到相同 global expert ID；每个 rank
 再 all-reduce 相加为完整 MoE 输出。它不拆分很小的单个 expert，而是把不同 experts 分卡。
 `naive` dispatch 对每个本地 expert 扫描一次 routing 结果；默认 `sorted` 只筛选一次本
 rank assignments，再按 expert 排序分组，减少重复动态 `where`。二者共用相同权重和通信，
-方便做优化前后 A/B。该路径仍是逐 expert GEMM 正确性基线；更高性能版本应结合 token
-ownership、all-to-all dispatch/combine 和 grouped GEMM/Triton。数据依赖的 MoE
-dispatch 仍走 eager。
+方便做优化前后 A/B。`grouped` 进一步只保留活跃 experts，将变长 assignment 填充为
+batched matrices，以两次 `bmm` 替代 Python 逐 expert GEMM loop；这是兼容 PyTorch 2.5
+的 portable grouped baseline，仍可能付出 padding 和一次 `max_count.item()` 同步，后续
+Triton/fused kernel 可在结果证明值得时替换它。若路由极端倾斜使 padding 超过真实
+assignment 的两倍，该路径会回退到逐活跃 expert GEMM，避免临时 tensor 放大导致 OOM。
+
+`all_to_all` 不建立新的 TP×EP mesh，而是复用相同 rank group：先将 flattened tokens 按
+连续区间指定给 source rank；source 将 top-k assignments 按 `(expert owner, local expert)`
+排序，经第一次 variable all-to-all 发到 expert owner；owner 用 grouped 路径计算，再经
+第二次 all-to-all 原路返回，source 根据 routing weight `index_add`。expert ID 不逐条传输，
+只交换一个 `[world_size, num_local_experts]` count matrix 来重建分组。由于下一层
+Attention TP 仍要求每个 rank 拥有全部 tokens，最后还必须 all-gather 各 source 的连续
+token output。它是与 replicated-token + all-reduce 对照的 reference EP 路径，不承诺在
+禁用 P2P 的消费卡上更快。所有数据依赖 MoE dispatch 仍走 eager。
 
 `HuggingFaceTokenizer` 离线加载 checkpoint tokenizer；chat endpoint 直接调用模型自带的 `apply_chat_template()`，支持 Qwen3 `enable_thinking`，不再手写 role 字符串。增量 decoder 保存生成 token 上下文，只发送稳定、可打印的新后缀，避免单个 token 的 UTF-8 byte fragment 产生乱码。
 
@@ -439,15 +450,15 @@ align_down(len(prompt) - 1, page_size)
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense Qwen3、FA2 paged attention、Decode Graph 和基础 dense TP；尚无 grouped GEMM/EP/TP Graph |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；尚无 fused MoE/TP Graph |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
 ## 9. 当前限制
 
 - 本地只有 dense Qwen3-0.6B checkpoint；真实 Qwen3-30B-A3B 已在云端完成一次可复现验收，原始结果已归档；
-- MoE 已有 expert ownership 分片，但仍使用 replicated-token all-reduce 和逐 expert loop，
-  尚无 all-to-all、grouped GEMM 或负载均衡性能优化；
+- MoE 已有 replicated-token all-reduce、padded-batched grouped GEMM 和 token
+  all-to-all reference 路径；尚无 fused grouped kernel、独立 TP×EP mesh 或负载均衡优化；
 - TP=1 使用单进程同步 worker；TP>1 目前镜像 Scheduler，尚未分离独立 Engine 进程，也没有 scheduler/forward overlap；
 - 纯 Decode metadata 已复用；ragged/mixed metadata 与 slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
@@ -455,7 +466,7 @@ align_down(len(prompt) - 1, page_size)
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
 - CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
 - dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
-  all-to-all EP、vocab parallel、worker 超时与故障恢复尚未完成；
+  新增 grouped/all-to-all 路径尚待 CUDA A/B，vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。

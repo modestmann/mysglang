@@ -137,6 +137,17 @@ def _moe_tp_worker(
         with torch.inference_mode():
             legacy_actual = legacy_model(input_ids)
         torch.testing.assert_close(legacy_actual, expected, atol=1e-5, rtol=1e-5)
+
+        for backend in ("grouped", "all_to_all"):
+            optimized_model = Qwen3ForCausalLM(
+                config,
+                tensor_parallel=parallel,
+                moe_dispatch_backend=backend,
+            ).eval()
+            load_huggingface_state_dict(optimized_model, state_dict)
+            with torch.inference_mode():
+                optimized_actual = optimized_model(input_ids)
+            torch.testing.assert_close(optimized_actual, expected, atol=1e-5, rtol=1e-5)
     finally:
         dist.destroy_process_group()
 

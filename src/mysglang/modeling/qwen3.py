@@ -190,12 +190,13 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3Experts(nn.Module):
-    """Expert-sharded top-k dispatch with replicated token hidden states.
+    """Expert-sharded top-k dispatch with selectable communication and GEMM paths.
 
-    Each rank owns a contiguous subset of experts. Router IDs stay global; a rank computes
-    only assignments that target its local experts, then all-reduce combines the partial
-    token outputs. This deliberately simple first EP implementation can later be replaced
-    by token all-to-all plus grouped GEMM without changing the surrounding MoE block.
+    ``naive``, ``sorted`` and ``grouped`` keep token hidden states replicated and combine
+    rank-local expert contributions with all-reduce. ``all_to_all`` first gives each rank a
+    contiguous token shard, dispatches its assignments to expert owners, returns expert
+    outputs to token owners, then all-gathers token outputs because the following Attention
+    TP layer still requires replicated tokens.
     """
 
     def __init__(
@@ -205,8 +206,10 @@ class Qwen3Experts(nn.Module):
         dispatch_backend: str,
     ) -> None:
         super().__init__()
-        if dispatch_backend not in {"naive", "sorted"}:
-            raise ValueError("MoE dispatch backend must be 'naive' or 'sorted'")
+        if dispatch_backend not in {"naive", "sorted", "grouped", "all_to_all"}:
+            raise ValueError(
+                "MoE dispatch backend must be 'naive', 'sorted', 'grouped' or 'all_to_all'"
+            )
         self.num_experts = config.num_experts
         self.expert_parallel = expert_parallel
         self.dispatch_backend = dispatch_backend
@@ -253,7 +256,15 @@ class Qwen3Experts(nn.Module):
         selected_experts: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
-        if self.dispatch_backend == "sorted":
+        if self.dispatch_backend == "all_to_all":
+            return self._forward_all_to_all(
+                hidden_states,
+                selected_experts,
+                routing_weights,
+            )
+        if self.dispatch_backend == "grouped":
+            result = self._forward_grouped(hidden_states, selected_experts, routing_weights)
+        elif self.dispatch_backend == "sorted":
             result = self._forward_sorted(hidden_states, selected_experts, routing_weights)
         else:
             result = self._forward_naive(hidden_states, selected_experts, routing_weights)
@@ -277,6 +288,185 @@ class Qwen3Experts(nn.Module):
             current = current * routing_weights[token_idx, top_k_slot, None]
             result.index_add_(0, token_idx, current.to(result.dtype))
         return result
+
+    def _grouped_expert_gemm(
+        self,
+        inputs: torch.Tensor,
+        local_experts: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run active experts as two padded batched GEMMs and preserve assignment order.
+
+        Native grouped-GEMM availability differs across supported PyTorch/CUDA builds. This
+        portable baseline groups variable-size expert batches into padded active-expert
+        matrices, replacing the Python per-expert GEMM loop with two ``bmm`` launches. The
+        cloud benchmark decides whether padding or launch reduction wins for a workload.
+        """
+        if inputs.size(0) != local_experts.numel():
+            raise ValueError("expert inputs and IDs must contain the same assignments")
+        if inputs.size(0) == 0:
+            return torch.empty_like(inputs)
+
+        order = torch.argsort(local_experts, stable=True)
+        sorted_experts = local_experts[order]
+        sorted_inputs = inputs[order]
+        active_experts, counts = torch.unique_consecutive(
+            sorted_experts,
+            return_counts=True,
+        )
+        max_count = int(counts.max().item())
+        # A badly imbalanced router could otherwise allocate
+        # [num_active_experts, max_count, ...] close to num_experts times too large.
+        # Preserve correctness and memory safety by falling back only for that skewed case.
+        padded_assignments = active_experts.numel() * max_count
+        if padded_assignments > inputs.size(0) * 2:
+            sorted_output = torch.empty_like(sorted_inputs)
+            start = 0
+            for expert_idx, count in zip(active_experts.tolist(), counts.tolist()):
+                end = start + count
+                gate, up = F.linear(
+                    sorted_inputs[start:end],
+                    self.gate_up_proj[expert_idx],
+                ).chunk(2, dim=-1)
+                sorted_output[start:end] = F.linear(
+                    F.silu(gate) * up,
+                    self.down_proj[expert_idx],
+                )
+                start = end
+            output = torch.empty_like(sorted_output)
+            output[order] = sorted_output
+            return output
+        active_batch = torch.repeat_interleave(
+            torch.arange(active_experts.numel(), device=inputs.device),
+            counts,
+        )
+        starts = torch.cumsum(counts, dim=0) - counts
+        slots = torch.arange(inputs.size(0), device=inputs.device) - torch.repeat_interleave(
+            starts,
+            counts,
+        )
+
+        padded = inputs.new_zeros((active_experts.numel(), max_count, inputs.size(-1)))
+        padded[active_batch, slots] = sorted_inputs
+        gate_up = torch.bmm(
+            padded,
+            self.gate_up_proj[active_experts].transpose(1, 2),
+        )
+        gate, up = gate_up.chunk(2, dim=-1)
+        padded_output = torch.bmm(
+            F.silu(gate) * up,
+            self.down_proj[active_experts].transpose(1, 2),
+        )
+        sorted_output = padded_output[active_batch, slots]
+        output = torch.empty_like(sorted_output)
+        output[order] = sorted_output
+        return output
+
+    def _forward_grouped(
+        self,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute this rank's replicated-token assignments with batched expert GEMMs."""
+        top_k = selected_experts.size(1)
+        flat_experts = selected_experts.reshape(-1)
+        owned = (flat_experts >= self.local_expert_start) & (
+            flat_experts < self.local_expert_end
+        )
+        assignment_indices = torch.where(owned)[0]
+        token_indices = torch.div(assignment_indices, top_k, rounding_mode="floor")
+        top_k_slots = assignment_indices.remainder(top_k)
+        local_experts = flat_experts[assignment_indices] - self.local_expert_start
+        current = self._grouped_expert_gemm(hidden_states[token_indices], local_experts)
+        current = current * routing_weights[token_indices, top_k_slots, None]
+        result = torch.zeros_like(hidden_states)
+        result.index_add_(0, token_indices, current.to(result.dtype))
+        return result
+
+    @staticmethod
+    def _token_shard_sizes(total_tokens: int, world_size: int) -> tuple[int, ...]:
+        base, remainder = divmod(total_tokens, world_size)
+        return tuple(base + (rank < remainder) for rank in range(world_size))
+
+    def _forward_all_to_all(
+        self,
+        hidden_states: torch.Tensor,
+        selected_experts: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch token-owned assignments to expert owners and combine them back."""
+        parallel = self.expert_parallel
+        if not parallel.enabled:
+            return self._forward_grouped(hidden_states, selected_experts, routing_weights)
+
+        token_sizes = self._token_shard_sizes(hidden_states.size(0), parallel.world_size)
+        token_start = sum(token_sizes[: parallel.rank])
+        token_end = token_start + token_sizes[parallel.rank]
+        local_hidden = hidden_states[token_start:token_end]
+        local_selected = selected_experts[token_start:token_end]
+        local_routing = routing_weights[token_start:token_end]
+        top_k = selected_experts.size(1)
+
+        flat_experts = local_selected.reshape(-1)
+        local_token_indices = torch.arange(
+            local_hidden.size(0),
+            device=hidden_states.device,
+        ).repeat_interleave(top_k)
+        destination_ranks = torch.div(
+            flat_experts,
+            self.num_local_experts,
+            rounding_mode="floor",
+        )
+        local_experts = flat_experts.remainder(self.num_local_experts)
+        # Sorting by (destination rank, local expert) lets the receiver reconstruct expert
+        # IDs from a small count matrix instead of sending one int64 ID per assignment.
+        dispatch_keys = destination_ranks * self.num_local_experts + local_experts
+        order = torch.argsort(dispatch_keys, stable=True)
+        send_hidden = local_hidden[local_token_indices[order]]
+        send_weights = local_routing.reshape(-1)[order]
+        send_token_indices = local_token_indices[order]
+
+        send_expert_counts = torch.bincount(
+            dispatch_keys,
+            minlength=parallel.world_size * self.num_local_experts,
+        ).to(dtype=torch.int64)
+        metadata_splits = [self.num_local_experts] * parallel.world_size
+        recv_expert_counts = parallel.all_to_all_variable(
+            send_expert_counts,
+            output_split_sizes=metadata_splits,
+            input_split_sizes=metadata_splits,
+        ).view(parallel.world_size, self.num_local_experts)
+        send_counts = send_expert_counts.view(
+            parallel.world_size,
+            self.num_local_experts,
+        ).sum(dim=1).tolist()
+        recv_counts = recv_expert_counts.sum(dim=1).tolist()
+
+        received_hidden = parallel.all_to_all_variable(
+            send_hidden,
+            output_split_sizes=recv_counts,
+            input_split_sizes=send_counts,
+        )
+        received_experts = torch.repeat_interleave(
+            torch.arange(self.num_local_experts, device=hidden_states.device).repeat(
+                parallel.world_size
+            ),
+            recv_expert_counts.reshape(-1),
+        )
+        received_outputs = self._grouped_expert_gemm(received_hidden, received_experts)
+        returned_outputs = parallel.all_to_all_variable(
+            received_outputs,
+            output_split_sizes=send_counts,
+            input_split_sizes=recv_counts,
+        )
+
+        local_result = torch.zeros_like(local_hidden)
+        local_result.index_add_(
+            0,
+            send_token_indices,
+            (returned_outputs * send_weights[:, None]).to(local_result.dtype),
+        )
+        return parallel.all_gather_variable_first_dim(local_result, token_sizes)
 
     def _forward_sorted(
         self,

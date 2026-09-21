@@ -1,6 +1,7 @@
 import unittest
 
 import torch
+import torch.nn.functional as F
 
 from mysglang import ModelConfig, Qwen3ForCausalLM, load_huggingface_state_dict
 
@@ -148,6 +149,42 @@ class ModelRegressionTest(unittest.TestCase):
         torch.testing.assert_close(
             naive_model(input_ids),
             actual,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+
+        for backend in ("grouped", "all_to_all"):
+            optimized_model = Qwen3ForCausalLM(
+                config,
+                moe_dispatch_backend=backend,
+            ).eval()
+            load_huggingface_state_dict(optimized_model, reference.state_dict())
+            torch.testing.assert_close(
+                optimized_model(input_ids),
+                actual,
+                atol=1e-5,
+                rtol=1e-5,
+            )
+
+        # Exercise the memory-safe skew fallback: padding four active experts to the
+        # busiest expert would exceed twice the real assignment count.
+        experts = optimized_model.layers[0].mlp.experts
+        expert_inputs = torch.randn(13, config.hidden_size)
+        local_experts = torch.tensor([0] * 10 + [1, 2, 3])
+        expected_expert_outputs = torch.empty_like(expert_inputs)
+        for expert_idx in range(config.num_experts):
+            indices = torch.where(local_experts == expert_idx)[0]
+            gate, up = F.linear(
+                expert_inputs[indices],
+                experts.gate_up_proj[expert_idx],
+            ).chunk(2, dim=-1)
+            expected_expert_outputs[indices] = F.linear(
+                F.silu(gate) * up,
+                experts.down_proj[expert_idx],
+            )
+        torch.testing.assert_close(
+            experts._grouped_expert_gemm(expert_inputs, local_experts),
+            expected_expert_outputs,
             atol=1e-5,
             rtol=1e-5,
         )

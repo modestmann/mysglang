@@ -51,8 +51,8 @@ Transformers 四卡分配的 BF16 greedy oracle；在 oracle 完成前只能称�
 
 ## 4. 后续优化顺序
 
-1. grouped GEMM/Triton，替换逐 expert `F.linear`；
-2. 引入 token ownership/sequence parallel 后再比较 all-reduce 与 all-to-all EP；
+1. 先以 padded-batched grouped GEMM 替换逐 expert `F.linear`，实测后再决定是否写 Triton；
+2. 用 token ownership + all-to-all reference 比较 replicated-token all-reduce；
 3. router/expert 负载统计与不均衡分析；
 4. 真实请求集、长上下文和稳定多轮重复。
 
@@ -69,3 +69,28 @@ replicated hidden 布局下，直接换 all-to-all 未必更省通信，不能�
 - 四卡峰值显存 16,718～16,722 MiB；
 - 所有 GPU pair 的 CUDA P2P 均不可用，NCCL ring 实际走 SHM；因此下一步 all-to-all
   EP 必须与当前 all-reduce 基线做实机 A/B，不能由拓扑标签推断收益。
+
+## 6. grouped / all-to-all 第二轮矩阵
+
+代码加入新 backend 后，在相同 commit、prompt、seed 和资源参数下分别把 `{dispatch}`
+替换为 `sorted`、`grouped` 和 `all_to_all`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src \
+  .venv/bin/torchrun --standalone --nproc-per-node=4 \
+  benchmarks/benchmark_generation.py \
+  --model /root/models/Qwen3-30B-A3B --tensor-parallel-size 4 \
+  --name "moe-tp4-{dispatch}-c8-p128-o64" --moe-dispatch "{dispatch}" \
+  --concurrency 8 --prompt-tokens 128 --max-new-tokens 64 --num-pages 64 \
+  --output benchmarks/results/qwen3-30b-a3b-grouped-a2a-4090x4.jsonl
+```
+
+同样补跑 C1/P128/O64 和 C4/P1024/O32，并至少重复三次。先逐请求核对三条路径 token；
+再比较 output tok/s、TTFT/ITL、峰值显存和利用率。使用 `NCCL_DEBUG=INFO` 保存一轮
+all-to-all 日志。解释结果时按以下两组差分：
+
+- `grouped - sorted`：只反映 batched expert GEMM 和 padding/layout 成本；
+- `all_to_all - grouped`：反映 token dispatch/combine、metadata 和最终 token all-gather。
+
+当前 Attention 仍为 TP=4，所以 all-to-all 返回 source rank 后必须 all-gather 完整 token
+hidden；这不是独立 TP×EP mesh，也不能把它描述为省掉了所有 MoE 层尾通信。
