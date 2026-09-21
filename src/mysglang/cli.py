@@ -75,6 +75,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--system", help="optional system message")
     parser.add_argument("--prompt", help="run one prompt and exit instead of opening the REPL")
     parser.add_argument("--num-pages", type=int, default=16)
+    parser.add_argument("--max-running-requests", type=int, default=1)
+    parser.add_argument(
+        "--prefill-token-budget",
+        type=int,
+        help="new prompt tokens admitted per scheduler step; defaults to KV capacity",
+    )
     parser.add_argument("--cuda-graph", action="store_true", help="capture the greedy B=1 decode")
     parser.add_argument(
         "--tensor-parallel-size",
@@ -168,12 +174,16 @@ def _rank_device(name: str, launch: _DistributedLaunch) -> torch.device:
 
 def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
     page_size = 256 if isinstance(backend, FlashAttentionBackend) else 16
+    prefill_token_budget = args.prefill_token_budget or args.num_pages * page_size
+    graph_batch_sizes = getattr(args, "decode_cuda_graph_batch_sizes", None)
+    if graph_batch_sizes is None:
+        graph_batch_sizes = (1,) if args.cuda_graph else ()
     return SchedulerConfig(
-        max_running_requests=1,
-        prefill_token_budget=args.num_pages * page_size,
+        max_running_requests=args.max_running_requests,
+        prefill_token_budget=prefill_token_budget,
         num_pages=args.num_pages,
         page_size=page_size,
-        decode_cuda_graph_batch_sizes=(1,) if args.cuda_graph else (),
+        decode_cuda_graph_batch_sizes=graph_batch_sizes,
     )
 
 
