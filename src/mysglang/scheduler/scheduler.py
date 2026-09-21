@@ -1,3 +1,27 @@
+"""
+每个 rank 都有一个自己的 Scheduler 实例；rank 0 的 TensorParallelScheduler
+负责向其他 rank 广播命令，让这些 Scheduler 保持镜像一致。
+rank 0                                      rank 1
+  ──────────────────────                      ──────────────────────
+  GenerationService                           不创建 Service
+          │
+  TensorParallelScheduler                     run_worker_loop()
+          │                                          │
+  广播 add / step / abort ──────────────────────────>│
+          │                                          │
+  本地 Scheduler 0                           本地 Scheduler 1
+  本地 Radix/页表                            本地 Radix/页表
+  GPU 0 的局部 KV pool                       GPU 1 的局部 KV pool
+          │                                          │
+          └──────── 同步进入 model forward ──────────┘
+                              │
+                        TP all-reduce
+其他 rank 不需要这些东西，只进入：
+
+tp_scheduler.run_worker_loop()
+
+等待 rank 0 发命令
+"""
 from __future__ import annotations
 
 from collections import deque
@@ -11,6 +35,7 @@ from mysglang.modeling.cuda_graph import DecodeCudaGraphRunner
 from mysglang.modeling.qwen3 import Qwen3ForCausalLM
 
 from .config import SchedulerConfig
+from .coordination import SchedulerBatchPlan, SchedulerCoordinator
 from .sampler import sample_token
 
 
@@ -60,14 +85,25 @@ class Scheduler:
     cache. There is deliberately no selectable legacy backend anymore.
     """
 
-    def __init__(self, model: Qwen3ForCausalLM, config: SchedulerConfig) -> None:
-        if model.tensor_parallel.enabled:
+    def __init__(
+        self,
+        model: Qwen3ForCausalLM,
+        config: SchedulerConfig,
+        *,
+        coordinator: SchedulerCoordinator | None = None,
+    ) -> None:
+        if model.tensor_parallel.enabled and coordinator is None:
             raise RuntimeError(
                 "Tensor-parallel models require the distributed worker runtime; "
                 "the single-process Scheduler cannot drive collectives safely"
             )
+        if model.tensor_parallel.enabled and config.decode_cuda_graph_batch_sizes:
+            raise RuntimeError(
+                "TP Decode CUDA Graph capture is not implemented; use eager Decode first"
+            )
         self.model = model.eval()
         self.config = config
+        self._coordinator = coordinator
         parameter = next(model.parameters())
         self.cache = RadixPagedKVCache.from_config(
             model.config,
@@ -272,6 +308,15 @@ class Scheduler:
             packed_offset += end - start
             if end == len(entry.request.prompt_token_ids):
                 logits_indices.append(packed_offset - 1)
+        phase = "mixed" if decoding else "prefill"
+        self._validate_batch_plan(
+            phase=phase,
+            execution="packed",
+            request_ids=request_ids,
+            input_token_ids=tuple(packed_tokens),
+            append_lengths=append_lengths,
+            logits_indices=tuple(logits_indices),
+        )
         logits = self.model.forward_packed(
             input_ids,
             kv_cache=self.cache,
@@ -285,14 +330,25 @@ class Scheduler:
         self._max_prefill_batch_size = max(self._max_prefill_batch_size, len(chunks))
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(decoding))
 
+        completed_prefills = [
+            entry for entry, _start, end in chunks if end == len(entry.request.prompt_token_ids)
+        ]
+        sampled_entries = decoding + completed_prefills
+        next_token_ids = self._sync_token_ids(
+            tuple(
+                self._sample(logits[index], entry.request)
+                for index, entry in enumerate(sampled_entries)
+            )
+        )
+
         outputs = []
-        for index, entry in enumerate(decoding):
-            event = entry.request.record_token(self._sample(logits[index], entry.request))
+        for entry, next_token in zip(decoding, next_token_ids[: len(decoding)]):
+            event = entry.request.record_token(next_token)
             outputs.append(event)
             if event.finished:
                 self._running.pop(entry.request.request_id)
                 self._release(entry, finished=True)
-        logits_offset = len(decoding)
+        token_offset = len(decoding)
         for entry, start, end in chunks:
             request = entry.request
             request_id = request.request_id
@@ -303,8 +359,8 @@ class Scheduler:
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
                 self.cache.publish_prefix(request_id, request.prompt_token_ids)
                 request.start_decode()
-                next_token = self._sample(logits[logits_offset], request)
-                logits_offset += 1
+                next_token = next_token_ids[token_offset]
+                token_offset += 1
                 event = request.record_token(next_token)
                 outputs.append(event)
                 if event.finished:
@@ -317,7 +373,7 @@ class Scheduler:
 
         return SchedulerStep(
             index=self._step_index,
-            phase="mixed" if decoding else "prefill",
+            phase=phase,
             request_ids=request_ids,
             input_tokens=input_token_count,
             outputs=tuple(outputs),
@@ -356,11 +412,20 @@ class Scheduler:
             self.cache.ensure_capacity(request_id, length + 1)
         input_token_ids = tuple(entry.request.last_output_token_id for entry in entries)
         graph_eligible = all(entry.request.sampling_params.is_greedy for entry in entries)
-        if (
+        use_cuda_graph = (
             graph_eligible
             and self._cuda_graph_runner
             and self._cuda_graph_runner.supports(len(entries))
-        ):
+        )
+        self._validate_batch_plan(
+            phase="decode",
+            execution="decode-graph" if use_cuda_graph else "decode-eager",
+            request_ids=request_ids,
+            input_token_ids=input_token_ids,
+            append_lengths=(1,) * len(entries),
+            logits_indices=None,
+        )
+        if use_cuda_graph:
             # 满足固定 Decode bucket 条件后，从这里进入 Graph replay。
             next_token_ids = self._cuda_graph_runner.run(input_token_ids, request_ids)
         else:
@@ -386,6 +451,7 @@ class Scheduler:
                 self._sample(logits[index, -1], entry.request)
                 for index, entry in enumerate(entries)
             )
+        next_token_ids = self._sync_token_ids(next_token_ids)
         self._model_forwards += 1
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(entries))
 
@@ -437,3 +503,37 @@ class Scheduler:
                     generator.manual_seed(params.seed)
                 self._sampling_generators[request.request_id] = generator
         return sample_token(logits, params, generator=generator)
+
+    def _validate_batch_plan(
+        self,
+        *,
+        phase: str,
+        execution: str,
+        request_ids: tuple[str, ...],
+        input_token_ids: tuple[int, ...],
+        append_lengths: tuple[int, ...],
+        logits_indices: tuple[int, ...] | None,
+    ) -> None:
+        if self._coordinator is None:
+            return
+        plan = SchedulerBatchPlan(
+            phase=phase,
+            execution=execution,
+            request_ids=request_ids,
+            input_token_ids=input_token_ids,
+            append_lengths=append_lengths,
+            logits_indices=logits_indices,
+            starts=self.cache.lengths(request_ids),
+            page_tables=tuple(
+                self.cache.allocator.page_table(request_id) for request_id in request_ids
+            ),
+        )
+        self._coordinator.validate_batch(plan)
+
+    def _sync_token_ids(self, token_ids: tuple[int, ...]) -> tuple[int, ...]:
+        if self._coordinator is None:
+            return token_ids
+        result = self._coordinator.sync_token_ids(token_ids)
+        if len(result) != len(token_ids):
+            raise RuntimeError("coordinator returned the wrong number of sampled tokens")
+        return result

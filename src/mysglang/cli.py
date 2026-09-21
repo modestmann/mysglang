@@ -1,15 +1,57 @@
+"""
+
+                      TP 多进程
+                         │
+            ┌────────────┴────────────┐
+            │                         │
+       控制面 Gloo                数据面 NCCL
+            │                         │
+   add / step / shutdown         GPU hidden tensor
+   request_id / 页表             Attention all-reduce
+   BatchPlan / token ID          MLP all-reduce
+
+torchrun --nproc-per-node=4 -m mysglang.cli
+
+  大致等价于外部替你执行了四次：
+
+  RANK=0 LOCAL_RANK=0 WORLD_SIZE=4 python -m mysglang.cli
+  RANK=1 LOCAL_RANK=1 WORLD_SIZE=4 python -m mysglang.cli
+  RANK=2 LOCAL_RANK=2 WORLD_SIZE=4 python -m mysglang.cli
+  RANK=3 LOCAL_RANK=3 WORLD_SIZE=4 python -m mysglang.cli
+
+  代码中显式出现的是“加入通信组”：
+
+  dist.init_process_group(backend="nccl", init_method="env://")
+
+  它的意思不是：
+
+  请 NCCL 创建四个进程
+
+  而是：
+
+  当前进程已经由 torchrun 创建好了；
+  请根据 RANK/WORLD_SIZE，让当前进程加入 NCCL 通信组。
+"""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import importlib.util
+import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 
-from mysglang.modeling import FlashAttentionBackend, Qwen3ForCausalLM, TorchAttentionBackend
-from mysglang.scheduler import SchedulerConfig
+from mysglang.modeling import (
+    FlashAttentionBackend,
+    Qwen3ForCausalLM,
+    TensorParallelContext,
+    TorchAttentionBackend,
+)
+from mysglang.scheduler import SchedulerConfig, TensorParallelScheduler
 from mysglang.serving import GenerationService
 from mysglang.tokenizer import HuggingFaceTokenizer
 
@@ -34,6 +76,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt", help="run one prompt and exit instead of opening the REPL")
     parser.add_argument("--num-pages", type=int, default=16)
     parser.add_argument("--cuda-graph", action="store_true", help="capture the greedy B=1 decode")
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        help="expected torchrun world size; inferred from WORLD_SIZE when omitted",
+    )
     return parser
 
 
@@ -56,11 +103,86 @@ def _make_backend(name: str, device: torch.device):
     return FlashAttentionBackend() if use_flash else TorchAttentionBackend()
 
 
-def _load_service(args: argparse.Namespace) -> GenerationService:
+@dataclass(frozen=True)
+class _DistributedLaunch:
+    world_size: int
+    rank: int
+    local_rank: int
+
+
+@dataclass
+class _LoadedRuntime:
+    service: GenerationService | None
+    scheduler: TensorParallelScheduler | None = None
+    owns_process_group: bool = False
+
+#读多进程参数
+def _read_distributed_launch(args: argparse.Namespace) -> _DistributedLaunch:
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", "0"))
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    except ValueError as exc:
+        raise ValueError("WORLD_SIZE, RANK and LOCAL_RANK must be integers") from exc
+    if world_size <= 0:
+        raise ValueError("WORLD_SIZE must be positive")
+    if not 0 <= rank < world_size:
+        raise ValueError("RANK must be within WORLD_SIZE")
+    if local_rank < 0:
+        raise ValueError("LOCAL_RANK must be non-negative")
+
+    expected = args.tensor_parallel_size
+    if expected is not None:
+        if expected <= 0:
+            raise ValueError("--tensor-parallel-size must be positive")
+        if expected != world_size:
+            raise ValueError(
+                f"--tensor-parallel-size={expected} but torchrun launched "
+                f"WORLD_SIZE={world_size}; start exactly one process per TP rank"
+            )
+    return _DistributedLaunch(world_size, rank, local_rank)
+
+
+def _rank_device(name: str, launch: _DistributedLaunch) -> torch.device:
+    requested = torch.device(name)
+    if launch.world_size == 1:
+        return requested
+    if requested.type == "cuda":
+        if requested.index is not None:
+            raise ValueError(
+                "do not put a CUDA index in --device under torchrun; LOCAL_RANK selects it"
+            )
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA tensor parallelism requested but CUDA is unavailable")
+        if launch.local_rank >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"LOCAL_RANK={launch.local_rank} has no visible CUDA device; "
+                f"only {torch.cuda.device_count()} device(s) are visible"
+            )
+        torch.cuda.set_device(launch.local_rank)
+        return torch.device("cuda", launch.local_rank)
+    if requested.type != "cpu":
+        raise ValueError("multi-process tensor parallelism supports only --device cuda or cpu")
+    return requested
+
+
+def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
+    page_size = 256 if isinstance(backend, FlashAttentionBackend) else 16
+    return SchedulerConfig(
+        max_running_requests=1,
+        prefill_token_budget=args.num_pages * page_size,
+        num_pages=args.num_pages,
+        page_size=page_size,
+        decode_cuda_graph_batch_sizes=(1,) if args.cuda_graph else (),
+    )
+
+
+def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
     model_path = args.model.expanduser().resolve()
     if not model_path.is_dir():
         raise FileNotFoundError(f"model directory does not exist: {model_path}")
-    device = torch.device(args.device)
+    launch = _read_distributed_launch(args)
+    device = _rank_device(args.device, launch)
     dtype = _resolve_dtype(args.dtype, device)
     backend = _make_backend(args.backend, device)
     if isinstance(backend, FlashAttentionBackend) and dtype not in {
@@ -68,30 +190,73 @@ def _load_service(args: argparse.Namespace) -> GenerationService:
         torch.bfloat16,
     }:
         raise ValueError("FlashAttention requires --dtype float16 or bfloat16")
+    if launch.world_size > 1 and args.cuda_graph:
+        raise ValueError("TP Decode CUDA Graph capture is not implemented yet")
+
+    owns_process_group = False
+    tensor_parallel = TensorParallelContext()
+    control_group: dist.ProcessGroup | None = None
+    if launch.world_size > 1:
+        if not dist.is_available():
+            raise RuntimeError("this PyTorch build does not provide torch.distributed")
+        model_backend = "nccl" if device.type == "cuda" else "gloo"
+        if model_backend == "nccl" and not dist.is_nccl_available():
+            raise RuntimeError("this PyTorch build does not provide NCCL")
+        if model_backend == "gloo" and not dist.is_gloo_available():
+            raise RuntimeError("this PyTorch build does not provide Gloo")
+        if dist.is_initialized():
+            if dist.get_world_size() != launch.world_size or dist.get_rank() != launch.rank:
+                raise RuntimeError("existing process group disagrees with torchrun environment")
+            if str(dist.get_backend()) != model_backend:
+                raise RuntimeError(
+                    f"existing process group uses {dist.get_backend()}, expected {model_backend}"
+                )
+        else:
+            dist.init_process_group(backend=model_backend, init_method="env://")
+            owns_process_group = True
+        tensor_parallel = TensorParallelContext.from_distributed()
+        # NCCL carries model tensors; a separate CPU/Gloo group carries Python
+        # scheduler commands and BatchPlan objects. CPU tests can reuse the default group.
+        if model_backend == "nccl":
+            control_group = dist.new_group(backend="gloo")
 
     print(
-        f"Loading {model_path} on {device} as {dtype} with {backend.name} ...",
+        f"[TP rank {launch.rank}/{launch.world_size}] Loading {model_path} on {device} "
+        f"as {dtype} with {backend.name} ...",
         flush=True,
     )
-    tokenizer = HuggingFaceTokenizer.from_pretrained(model_path)
     model = Qwen3ForCausalLM.from_pretrained(
         model_path,
         dtype=dtype,
         device=device,
         attention_backend=backend,
+        tensor_parallel=tensor_parallel,
     )
-    page_size = 256 if isinstance(backend, FlashAttentionBackend) else 16
-    return GenerationService(
+    scheduler_config = _scheduler_config(args, backend)
+    if tensor_parallel.enabled:
+        scheduler = TensorParallelScheduler(
+            model,
+            scheduler_config,
+            control_group=control_group,
+        )
+        if not scheduler.is_driver:
+            return _LoadedRuntime(
+                service=None,
+                scheduler=scheduler,
+                owns_process_group=owns_process_group,
+            )
+    else:
+        scheduler = None
+
+    # Only rank 0 turns text into token IDs and exposes the user-facing service.
+    tokenizer = HuggingFaceTokenizer.from_pretrained(model_path)
+    service = GenerationService(
         model,
         tokenizer,
-        SchedulerConfig(
-            max_running_requests=1,
-            prefill_token_budget=args.num_pages * page_size,
-            num_pages=args.num_pages,
-            page_size=page_size,
-            decode_cuda_graph_batch_sizes=(1,) if args.cuda_graph else (),
-        ),
+        scheduler_config,
+        scheduler=scheduler,
     )
+    return _LoadedRuntime(service, scheduler, owns_process_group)
 
 
 async def _generate(
@@ -117,8 +282,7 @@ async def _generate(
     return "".join(pieces)
 
 
-async def _run(args: argparse.Namespace) -> None:
-    service = _load_service(args)
+async def _run_driver(service: GenerationService, args: argparse.Namespace) -> None:
     messages: list[dict[str, str]] = []
     if args.system:
         messages.append({"role": "system", "content": args.system})
@@ -153,6 +317,26 @@ async def _run(args: argparse.Namespace) -> None:
             print(f"生成失败：{exc}")
             continue
         messages.append({"role": "assistant", "content": answer})
+
+
+async def _run(args: argparse.Namespace) -> None:
+    runtime = _load_runtime(args)
+    try:
+        if runtime.scheduler is not None and not runtime.scheduler.is_driver:
+            # Nonzero ranks never read prompts. They replay rank 0's add/step/abort
+            # commands so model collectives and rank-local KV metadata stay aligned.
+            runtime.scheduler.run_worker_loop()
+            return
+        if runtime.service is None:
+            raise RuntimeError("rank 0 did not create a generation service")
+        await _run_driver(runtime.service, args)
+    finally:
+        try:
+            if runtime.scheduler is not None and runtime.scheduler.is_driver:
+                runtime.scheduler.shutdown()
+        finally:
+            if runtime.owns_process_group and dist.is_initialized():
+                dist.destroy_process_group()
 
 
 def main() -> None:

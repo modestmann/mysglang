@@ -74,15 +74,16 @@ class TensorParallelContext:
         local_size = self.local_size(global_size, name)
         start = self.rank * local_size
         return slice(start, start + local_size)
-#从attention出来到MOE之前有一个投影矩阵，算到投影矩阵之后再all reduce
-#模型主要是attention+FFN MLP/MOE组成 ，attention和MLP都是TP，然后MOE实际上是多组MLP抽，用EP加（可选 ）内部TP
+
+    # Attention/MLP 的出口投影先算各 rank 的局部贡献，再 all-reduce 求和。
+    # Dense Attention 和 MLP 都可做 TP；MoE 是多组 MLP，通常使用 EP，并可选叠加 TP。
     def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.enabled:
             dist.all_reduce(tensor, group=self.process_group)
         return tensor
 
 # ColumnParallelLinear：用分片权重直接产生分片输出。
-#RowParallelLinear：用分片输入和分片权重计算局部贡献，再 all_reduce 求和。
+# RowParallelLinear：用分片输入和分片权重计算局部贡献，再 all-reduce 求和。
 class ColumnParallelLinear(nn.Module):
     """Shard each logical output segment independently across TP ranks.
 

@@ -20,7 +20,14 @@ from .modeling import (
     TorchAttentionBackend,
     load_huggingface_state_dict,
 )
-from .scheduler import Scheduler, SchedulerConfig, SchedulerStats, SchedulerStep
+from .scheduler import (
+    Scheduler,
+    SchedulerBatchPlan,
+    SchedulerConfig,
+    SchedulerStats,
+    SchedulerStep,
+    TensorParallelScheduler,
+)
 from .serving import GenerationChunk, GenerationService, GenerationSession
 from .tokenizer import ByteTokenizer, HuggingFaceTokenizer
 
@@ -44,10 +51,12 @@ __all__ = [
     "RequestState",
     "SamplingParams",
     "Scheduler",
+    "SchedulerBatchPlan",
     "SchedulerConfig",
     "SchedulerStats",
     "SchedulerStep",
     "TorchAttentionBackend",
     "TensorParallelContext",
+    "TensorParallelScheduler",
     "load_huggingface_state_dict",
 ]

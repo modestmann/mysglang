@@ -72,15 +72,23 @@
   输入分片，不先在 GPU 上构造完整权重；
 - 已用两个 Gloo 进程验证小型 dense Qwen3 的 TP=2 logits 与 TP=1 对齐；embedding
   和 LM head 暂时复制，以先固定 attention/MLP 的通信边界；
+- 已建立基础多进程运行时：rank 0 广播 add/abort/step 控制命令，各 rank 镜像
+  Scheduler、Radix 元数据和 rank-local KV pool；每轮 forward 前广播并核对 BatchPlan，
+  采样后再由 rank 0 广播权威 token；
+- 控制消息使用 CPU/Gloo process group，模型 TP collective 可独立使用 NCCL group；
+- 已用两个 Gloo 进程跑通 chunked Prefill、混合 Prefill/Decode 和纯 Decode，并与
+  TP=1 逐 token 对齐，结束后各 rank 的 cache 完整性一致；
+- 已接入 `torchrun` CLI 启动链：从环境解析 global/local rank，每个进程绑定本地设备，
+  CUDA 使用 NCCL model group + 独立 Gloo control group；仅 rank 0 构造 tokenizer 和
+  GenerationService，其他 rank 进入 worker loop，退出时由 rank 0 广播 shutdown；
 - 分离前端/tokenizer、Scheduler/Engine 和 detokenizer 进程；
-- 实现 column/row parallel linear、vocab parallel embedding/head；
-- 控制消息与 NCCL tensor 通信分离；
-- 由 rank 0 广播 batch plan，并对各 rank 顺序做 hash/assertion；
+- 实现 vocab parallel embedding/head；
 - 处理 worker 异常、超时和 shutdown，避免静默卡死。
 
-当前单进程 `Scheduler` 会明确拒绝 TP model，避免只有 rank 0 进入 collective 后死锁。
-下一步先完成 rank worker 与 batch-plan 广播，再在云端以 NCCL 验证 TP=2/4；随后扩展
-MoE TP，并在其正确性基线上加入 expert ownership 与 all-to-all EP。
+当前单进程 `Scheduler` 仍会拒绝 TP model；TP 必须通过 `TensorParallelScheduler` 让所有
+rank 同步进入 collective。TP CUDA Graph 和跨 rank 故障恢复尚未实现。下一步在云端
+验证当前独立 Gloo 控制组 + NCCL 模型组的 TP=2/4；随后扩展 MoE TP，并在其正确性
+基线上加入 expert ownership 与 all-to-all EP。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

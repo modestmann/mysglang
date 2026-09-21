@@ -8,7 +8,12 @@ from typing import Protocol
 
 from mysglang.core import FinishReason, IncrementalOutput, Request, SamplingParams
 from mysglang.modeling.qwen3 import Qwen3ForCausalLM
-from mysglang.scheduler import Scheduler, SchedulerConfig, SchedulerStats
+from mysglang.scheduler import (
+    Scheduler,
+    SchedulerConfig,
+    SchedulerStats,
+    TensorParallelScheduler,
+)
 
 
 class IncrementalDecoder(Protocol):
@@ -67,12 +72,15 @@ class GenerationService:
         model: Qwen3ForCausalLM,
         tokenizer: Tokenizer,
         scheduler_config: SchedulerConfig,
+        *,
+        scheduler: Scheduler | TensorParallelScheduler | None = None,
     ) -> None:
         if model.config.vocab_size < tokenizer.vocab_size:
             raise ValueError("model vocab_size is smaller than the tokenizer ID space")
         self.model = model
         self.tokenizer = tokenizer
-        self.scheduler = Scheduler(model, scheduler_config)
+        # TP 时由 rank 0 注入分布式 facade；单卡仍沿用本地 Scheduler。
+        self.scheduler = scheduler or Scheduler(model, scheduler_config)
         self._request_ids = itertools.count()
         self._queues: dict[str, asyncio.Queue[IncrementalOutput | BaseException]] = {}
         self._worker_task: asyncio.Task[None] | None = None

@@ -9,7 +9,7 @@
 - 控制面处理 request ID、状态、队列、准入、abort 和输出路由；
 - 数据面处理 token tensor、positions、page table、K/V、attention 和 logits。
 
-当前请求路径为：
+单 rank 请求路径为：
 
 ```text
 HTTP / caller
@@ -42,7 +42,14 @@ HTTP session
 
 `GenerationSession` 只能消费一次。惰性 enqueue 使“创建后从未消费的 session”只持有普通 Request 对象，不进入 waiting 集合，也不占调度槽、KV reservation 或物理页。
 
-这里只有一个全局 `Scheduler`。`request_id -> Queue` 不是另一套调度结构，而是每个请求的输出邮箱；它避免并发 session 从一个全局结果队列中抢到别人的 token。Queue 只保存尚未消费的事件，完整输出 token 仍由 Request 持有。公开服务接口已经收敛为 `GenerationService` / `GenerationSession`，调度接口为 `Scheduler` / `SchedulerConfig`。
+TP=1 时只有一个全局 `Scheduler`。TP>1 时 rank 0 对外暴露同样的调度接口，所有 rank
+各自镜像 Scheduler/Radix 元数据并持有 rank-local KV pool；rank 0 广播控制命令和每轮
+BatchPlan，使所有进程以相同顺序进入模型 collective。详细边界见第 6 节。
+
+`request_id -> Queue` 不是另一套调度结构，而是每个请求的输出邮箱；它避免并发 session
+从一个全局结果队列中抢到别人的 token。Queue 只保存尚未消费的事件，完整输出 token
+仍由 Request 持有。公开服务接口已经收敛为 `GenerationService` / `GenerationSession`，
+调度接口为单 rank `Scheduler` 或 rank 0 使用的 `TensorParallelScheduler`。
 
 核心所有权如下：
 
@@ -58,6 +65,8 @@ HTTP session
 | PagedKVCache | 真正的逐层 K/V pool | 请求到达与输出传输 |
 | Model | hidden states、Q/K/V 投影和 logits | 请求生命周期 |
 | AttentionBackend | KV 写入、attention kernel 与输出 | 调度策略和请求生命周期 |
+| TensorParallelContext | 当前 rank、TP 大小和模型 collective group | 请求调度与进程启动 |
+| TensorParallelScheduler | rank 0 命令广播、BatchPlan 校验和 token 同步 | Linear 分片数学 |
 
 ## 2. 实现演进与当前地位
 
@@ -71,7 +80,10 @@ HTTP session
 | Paged KV Cache | 请求按需使用离散物理页 | 当前内存管理基础 |
 | Radix prefix cache | 已计算的完整页可在请求仍 Decode 时被复用 | 当前默认缓存策略 |
 
-最终主线是一个 `Scheduler` 和一个 `GenerationService`。Scheduler 内部固定使用 paged + radix cache；旧的 contiguous/slot cache 与平行 scheduler 已删除。完整前缀重算只作为测试 helper 中的 correctness oracle 保留。
+最终主线只有一个逻辑调度入口和一个 `GenerationService`。TP=1 直接使用 `Scheduler`；
+TP>1 由 `TensorParallelScheduler` 在各 rank 重放同一组调度命令。Scheduler 内部固定使用
+paged + radix cache；旧的 contiguous/slot cache 与历史平行实现已删除。完整前缀重算只
+作为测试 helper 中的 correctness oracle 保留。
 
 ## 3. 请求与调度不变量
 
@@ -188,7 +200,12 @@ o_proj        [hidden, q_heads * head_dim]
 down_proj     [hidden, intermediate]
 ```
 
-SafeTensors loader 在 meta device 上建立模型，再用最终 dtype/device 一次分配存储，逐 tensor 复制权重，避免先构造完整 FP32 模型。Hugging Face checkpoint 中分离的 `q_proj/k_proj/v_proj` 和 `gate_proj/up_proj` 会写入 fused parameter 的不同切片；单文件和 index 分片 checkpoint 都使用同一条路径。fused QKV/gate-up 是未来 column parallel 的边界，o/down projection 是 row parallel 的边界，但当前尚未实现 rank、NCCL collective 或 distributed page-table 同步。
+SafeTensors loader 在 meta device 上建立模型，再用最终 dtype/device 一次分配存储，逐 tensor
+复制权重，避免先构造完整 FP32 模型。Hugging Face checkpoint 中分离的
+`q_proj/k_proj/v_proj` 和 `gate_proj/up_proj` 会写入 fused parameter 的不同切片；单文件
+和 index 分片 checkpoint 都使用同一条路径。TP 模式下 loader 从每个逻辑 tensor 分别
+取得当前 rank 的 Q/K/V、gate/up 行分片，o/down 则取得输入列分片；GPU 上不会先构造
+完整 projection 权重。
 
 MoE layer 根据 `decoder_sparse_step` 和 `mlp_only_layers` 选择 dense MLP 或 sparse block。Sparse block 执行：
 
@@ -213,7 +230,97 @@ Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler �
 
 本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers。真实 MoE checkpoint 留待具备足够显存的云端环境验证。
 
-## 6. Radix prefix cache
+## 6. Tensor Parallel 与多进程调度
+
+Tensor Parallel 解决的是“一次模型 forward 怎样由多张卡共同完成”，continuous batching
+解决的是“这一轮选择哪些请求和 token”。两者相互独立，但 TP 的所有 rank 必须执行同一
+个 batch，否则 collective 会死锁，或者在形状碰巧相同时产生请求/KV 错配。
+
+### 模型分片
+
+`TensorParallelContext` 保存 TP group 内的 `rank`、`world_size` 和模型通信
+`process_group`。TP=1 时所有 helper 退化为完整尺寸和 no-op collective，因此单卡和多卡
+共用模型代码。
+
+Dense Qwen3 使用成对的 column/row parallel：
+
+```text
+Attention:
+replicated hidden
+  -> column-parallel QKV
+  -> 每个 rank 的 local heads + rank-local paged KV
+  -> local attention
+  -> row-parallel O projection
+  -> all-reduce，恢复 replicated hidden
+
+MLP:
+replicated hidden
+  -> column-parallel gate/up
+  -> local SiLU(gate) * up
+  -> row-parallel down projection
+  -> all-reduce，恢复 replicated hidden
+```
+
+Column parallel 按输出维度切权重，每张卡直接计算局部输出，不先生成完整 tensor 再拆分。
+QKV 和 gate/up 是 fused parameter，但每个逻辑段必须独立切分，所以 rank 0/1 保存的是
+`[Q0,K0,V0]` / `[Q1,K1,V1]`，而不是对完整 `[Q,K,V]` 粗暴地从中间切一刀。
+
+Row parallel 按输入维度切权重。若 `x=[x0|x1]`、`W=[W0|W1]`，各 rank 先算
+`partial_r = xr @ Wr.T`，再以 all-reduce 求和得到完整输出；这里是求和，不是把向量
+all-gather 拼接。Column 和 Row 之间的 Attention/SwiGLU 激活始终保持分片，避免收集
+大型 intermediate tensor。
+
+当前 embedding、RMSNorm 和 LM head 仍在各 rank 复制，因此 all-reduce 后每个 rank
+都有相同的完整 logits。每层在 O projection 和 down projection 后各通信一次。KV pool
+只按本 rank 的 KV heads 分配，显存随 TP 缩小；page-table 逻辑布局则必须跨 rank 一致。
+MoE TP/EP 和 vocabulary-parallel embedding/head 尚未实现。
+
+### Scheduler 控制面
+
+当前基础运行时采用正确性优先的镜像方式：
+
+```text
+rank 0 TensorParallelScheduler
+  -> 广播 add / abort / step / reset / shutdown
+  -> 每个 rank 在本地镜像执行 Scheduler
+  -> rank 0 广播本轮权威 SchedulerBatchPlan
+  -> 所有 rank 比较本地计划，一致后才进入 model forward
+  -> 模型使用 TP group 做 tensor collective
+  -> rank 0 广播采样 token
+  -> 所有 rank 以相同 token 更新 Request、Radix 和 cache metadata
+```
+
+`SchedulerBatchPlan` 覆盖容易造成静默错误的字段：phase、eager/packed 执行类型、请求
+顺序、输入 token、append lengths、logits 位置、旧长度和每个请求的 page table。非零
+rank 不对外接收请求，只在 `run_worker_loop()` 中等待 rank 0 命令。每条命令结束后还会
+all-gather 结果或异常，检查请求状态迁移是否一致。
+
+控制消息使用 CPU/Gloo process group；模型权重和激活 collective 可以独立使用 NCCL
+TP group。这样 Python 对象广播不会混入高吞吐 tensor 通信。随机采样目前各 rank 都会
+计算一次，但最终以 rank 0 token 为权威并广播，保证下一轮输入和 prefix key 不分叉。
+
+正式 CLI 由 `torchrun` 设置 `WORLD_SIZE/RANK/LOCAL_RANK`。每个 rank 先把
+`cuda:LOCAL_RANK` 设为当前设备，再初始化默认 NCCL model group；随后所有 rank 以相同
+顺序建立 Gloo control group、加载各自的 checkpoint 分片并构造本地 Scheduler。rank 0
+继续构造 tokenizer 和 `GenerationService`，非零 rank 则进入 `run_worker_loop()`。rank 0
+退出交互或发生正常清理时会广播 `shutdown`，所有 worker 完成同一条命令后共同销毁
+process group。
+
+```text
+torchrun --nproc-per-node=4
+  ├─ rank 0 / cuda:0 -> service + TP scheduler driver
+  ├─ rank 1 / cuda:1 -> TP scheduler worker
+  ├─ rank 2 / cuda:2 -> TP scheduler worker
+  └─ rank 3 / cuda:3 -> TP scheduler worker
+```
+
+单进程 `Scheduler` 会拒绝 TP model，防止只有 rank 0 进入 all-reduce 后永久等待。
+TP Decode CUDA Graph 也暂时被拒绝，因为 Graph 内 collective 的同步捕获尚未在 GPU
+上验证。CPU/Gloo 已覆盖 chunked Prefill、mixed batch、纯 Decode、token 对齐和结束后
+cache 完整性；`torchrun` 启动链已经接入，NCCL TP=2/4、故障超时和独立 Engine 进程
+仍待云端完成。
+
+## 7. Radix prefix cache
 
 Radix Tree 只保存索引关系：
 
@@ -265,33 +372,34 @@ align_down(len(prompt) - 1, page_size)
 
 第三种方案仍需让该 token 依次经过所有 Transformer layers，因为后一层的 Q 依赖前一层 hidden state；在 fused QKV 模型中也未必能廉价地只算 Q。若还要共享可继续写入的部分页，则必须增加 copy-on-write。它们是工程权衡，不是当前 KV 正确性的缺陷。
 
-## 7. 与 Mini-SGLang 的关系
+## 8. 与 Mini-SGLang 的关系
 
 以下比较固定基于本地 `/home/sheep/mini-sglang` 快照 `9a91cfa`，不代表其未来版本。
 
 | 方面 | Mini-SGLang `9a91cfa` | MySGLang 当前选择 |
 |---|---|---|
-| 运行架构 | 多进程、每个 TP rank 持有 Scheduler/Engine | 单进程，先使状态和所有权可观察 |
+| 运行架构 | 多进程、每个 TP rank 持有 Scheduler/Engine | TP=1 单 Scheduler；TP>1 由 rank 0 广播命令，各 rank 镜像 Scheduler/KV metadata |
 | 请求状态 | 主要由对象所在容器和长度字段隐式表达 | 显式 enum、迁移检查和终止事件 |
 | 调度 | 简洁的 Prefill-before-Decode 路径，支持成熟的 flattened Prefill | Decode 每轮推进，与 budget 内的变长 Prefill 合为一次 forward |
 | 页表表示 | 内部保存展开后的 physical token indices | block table 直接保存 physical page IDs |
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | 真实 dense Qwen3、可读 MoE、FA2 paged attention 与精确 Decode Graph；尚无 TP/grouped GEMM |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense Qwen3、FA2 paged attention、Decode Graph 和基础 dense TP；尚无 grouped GEMM/EP/TP Graph |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
-## 8. 当前限制
+## 9. 当前限制
 
 - 本地只有 dense Qwen3-0.6B checkpoint；真实 MoE checkpoint 尚待云端验证；
 - MoE 使用逐 expert loop，尚无 grouped GEMM、expert parallel 或负载均衡性能优化；
-- 单进程同步 worker，没有 scheduler/forward overlap；
+- TP=1 使用单进程同步 worker；TP>1 目前镜像 Scheduler，尚未分离独立 Engine 进程，也没有 scheduler/forward overlap；
 - 纯 Decode metadata 已复用；ragged/mixed metadata 与 slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
-- CUDA Graph 目前只覆盖 dense、greedy、精确纯 Decode bucket；没有 Tensor Parallel 和生产容错；
+- CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
+- dense TP 已通过 CPU/Gloo 正确性测试，但尚未在 NCCL 多 GPU 上验证；MoE TP/EP、vocab parallel、worker 超时与故障恢复尚未实现；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。
