@@ -216,7 +216,16 @@ router linear -> fp32 softmax -> top-k experts
               -> routing-weighted index_add
 ```
 
-expert 参数按 `[num_experts, ...]` 保存，loader 同时接受新版 packed expert tensor 和旧版逐 expert gate/up/down tensor。当前逐 expert loop 以正确性和可读性为主，真实大 MoE 应在云端用 grouped GEMM/Triton 替换。数据依赖的动态 expert dispatch 尚未加入 CUDA Graph，因此配置 MoE Graph bucket 会被明确拒绝。
+单 rank 的 expert 参数按 `[num_experts, ...]` 保存；多 rank 时 global experts 按连续区间
+分配，每个 rank 只分配 `[num_experts / world_size, ...]`。loader 同时接受新版 packed
+expert tensor 和旧版逐 expert gate/up/down tensor：前者读取本 rank 的 expert 切片，
+后者识别全部 key 但只写入本 rank 拥有的 expert。
+
+当前是 replicated-token expert parallel：Attention 沿用 TP，all-reduce 后各 rank 都有完整
+hidden；router 在各 rank 复制并得到相同 global expert ID；每个 rank 只计算自己的 experts，
+再 all-reduce 相加为完整 MoE 输出。它不拆分很小的单个 expert，而是把不同 experts 分卡。
+该路径适合作为正确性基线；高性能版本应让各 rank 拥有不同 token，以 all-to-all
+dispatch/combine 并使用 grouped GEMM/Triton。数据依赖的 MoE dispatch 仍走 eager。
 
 `HuggingFaceTokenizer` 离线加载 checkpoint tokenizer；chat endpoint 直接调用模型自带的 `apply_chat_template()`，支持 Qwen3 `enable_thinking`，不再手写 role 字符串。增量 decoder 保存生成 token 上下文，只发送稳定、可打印的新后缀，避免单个 token 的 UTF-8 byte fragment 产生乱码。
 
@@ -228,7 +237,7 @@ decoder 每次重新解码累计 token，并维护已经发送的稳定前缀 `s
 
 Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。
 
-本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers。真实 MoE checkpoint 留待具备足够显存的云端环境验证。
+本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 MoE checkpoint 留待云端验证。
 
 ## 6. Tensor Parallel 与多进程调度
 
@@ -273,7 +282,8 @@ all-gather 拼接。Column 和 Row 之间的 Attention/SwiGLU 激活始终保持
 当前 embedding、RMSNorm 和 LM head 仍在各 rank 复制，因此 all-reduce 后每个 rank
 都有相同的完整 logits。每层在 O projection 和 down projection 后各通信一次。KV pool
 只按本 rank 的 KV heads 分配，显存随 TP 缩小；page-table 逻辑布局则必须跨 rank 一致。
-MoE TP/EP 和 vocabulary-parallel embedding/head 尚未实现。
+MoE 在同一进程组上组合 Attention TP 与 replicated-token expert 分片；vocabulary-parallel
+embedding/head、独立 TP/EP group 和 all-to-all token dispatch 尚未实现。
 
 ### Scheduler 控制面
 
@@ -392,14 +402,16 @@ align_down(len(prompt) - 1, page_size)
 ## 9. 当前限制
 
 - 本地只有 dense Qwen3-0.6B checkpoint；真实 MoE checkpoint 尚待云端验证；
-- MoE 使用逐 expert loop，尚无 grouped GEMM、expert parallel 或负载均衡性能优化；
+- MoE 已有 expert ownership 分片，但仍使用 replicated-token all-reduce 和逐 expert loop，
+  尚无 all-to-all、grouped GEMM 或负载均衡性能优化；
 - TP=1 使用单进程同步 worker；TP>1 目前镜像 Scheduler，尚未分离独立 Engine 进程，也没有 scheduler/forward overlap；
 - 纯 Decode metadata 已复用；ragged/mixed metadata 与 slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
 - CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
-- dense TP 已通过 CPU/Gloo 正确性测试，但尚未在 NCCL 多 GPU 上验证；MoE TP/EP、vocab parallel、worker 超时与故障恢复尚未实现；
+- dense TP 已在四张 RTX 4090 上通过 NCCL 实测；MoE expert 分片已通过 CPU/Gloo 正确性
+  测试，但真实 checkpoint 的 NCCL 验收、all-to-all EP、vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。

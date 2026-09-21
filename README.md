@@ -14,7 +14,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - greedy、temperature、top-k、top-p 与 per-request seed 采样；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
 
-本地 `../KuiperLLama/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐；真实 MoE checkpoint、Tensor Parallel 和多卡执行留到有足够显存的环境验收。
+本地 `../KuiperLLama/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐，并已加入 Attention TP + expert 分片的多进程路径；真实 MoE checkpoint 留到云端验收。
 
 ## 当前主调用链
 
@@ -89,7 +89,7 @@ PYTHONPATH=src python -m mysglang.cli
 默认使用同级 `KuiperLLama/artifacts/qwen3-0.6b/hf-source`，输入 `/reset` 清空上下文，
 输入 `/exit` 退出；其他 checkpoint 可用 `--model PATH` 指定。
 
-在一台四卡机器上启动 dense Qwen3 的 TP=4 交互推理：
+在一台四卡机器上启动 dense Qwen3 或 Qwen3MoE 的 TP=4 交互推理：
 
 ```bash
 PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
@@ -105,12 +105,12 @@ worker loop。`--tensor-parallel-size` 是防止启动参数写错的校验项�
 
 ## 当前边界
 
-- 本机只有 dense Qwen3-0.6B checkpoint；真实 Qwen3MoE 权重尚待云端加载验证；
+- 真实 Qwen3MoE 权重的四卡加载、显存和性能尚待云端验证；
 - MoE dispatch 当前是正确性优先的逐 expert 实现，尚未替换为 grouped GEMM；
 - 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
 - Scheduler 为单进程同步 step；纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 CUDA Graph，但 ragged/mixed metadata 仍由 Python 构造，尚未做调度/执行重叠；
-- 已完成 dense 模型级 TP 切分、checkpoint 分片加载、rank worker/batch-plan 广播和
-  `torchrun` CLI 启动链；尚待云端 NCCL TP=2/4 验收、MoE TP/EP、多进程容错或正式
+- 已完成 dense 模型级 TP、MoE expert 分片、checkpoint 分片加载、rank worker/batch-plan
+  广播和 `torchrun` CLI 启动链；尚待真实 MoE 云端验收、all-to-all EP、多进程容错或正式
   benchmark client；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 

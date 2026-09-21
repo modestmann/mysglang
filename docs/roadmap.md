@@ -47,7 +47,9 @@
 - 已用本地 Qwen3-0.6B 对齐最终 FP32 logits，并跑通 BF16 + FA2 paged-KV 单请求和并发生成；
 - 已实现 Qwen3MoE router、softmax/top-k、可选概率归一化和 expert dispatch，并与 Transformers 小 MoE logits 对齐；
 - 已增加 temperature、top-k、top-p 和独立 per-request seed；随机结果不受 continuous batch 组合影响；
-- 待云端加载真实 Qwen3MoE checkpoint，并用 grouped GEMM/Triton 替换正确性优先的 expert loop。
+- 已实现 replicated-token expert 分片：每个 rank 只加载/计算自己的 experts，输出以
+  all-reduce 合并；待云端加载真实 checkpoint，并用 all-to-all + grouped GEMM/Triton
+  替换正确性优先的通信与 expert loop。
 
 本地 dense 验收已完成：与 Transformers 对齐 layer/logits/greedy token，真实 checkpoint 完成单请求和并发 smoke test。MoE 的小模型 oracle 已完成，真实 checkpoint 验收等待云端显存。具体型号不写死在架构中。
 
@@ -78,6 +80,8 @@
 - 控制消息使用 CPU/Gloo process group，模型 TP collective 可独立使用 NCCL group；
 - 已用两个 Gloo 进程跑通 chunked Prefill、混合 Prefill/Decode 和纯 Decode，并与
   TP=1 逐 token 对齐，结束后各 rank 的 cache 完整性一致；
+- 已让 MoE 在同一进程组组合 Attention TP 和 expert ownership 分片；packed 与逐-expert
+  checkpoint 加载、TP=2 logits 及 continuous batching 均与 TP=1 对齐；
 - 已接入 `torchrun` CLI 启动链：从环境解析 global/local rank，每个进程绑定本地设备，
   CUDA 使用 NCCL model group + 独立 Gloo control group；仅 rank 0 构造 tokenizer 和
   GenerationService，其他 rank 进入 worker loop，退出时由 rank 0 广播 shutdown；
@@ -87,8 +91,8 @@
 
 当前单进程 `Scheduler` 仍会拒绝 TP model；TP 必须通过 `TensorParallelScheduler` 让所有
 rank 同步进入 collective。TP CUDA Graph 和跨 rank 故障恢复尚未实现。下一步在云端
-验证当前独立 Gloo 控制组 + NCCL 模型组的 TP=2/4；随后扩展 MoE TP，并在其正确性
-基线上加入 expert ownership 与 all-to-all EP。
+验证真实 Qwen3-30B-A3B 的四卡显存、token 与吞吐；随后把 replicated-token all-reduce
+基线替换为 token ownership + all-to-all EP，并加入 grouped GEMM。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

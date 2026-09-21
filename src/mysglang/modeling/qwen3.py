@@ -190,26 +190,58 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3Experts(nn.Module):
-    """Readable top-k expert dispatch; grouped GEMM can replace this narrow module later."""
+    """Expert-sharded top-k dispatch with replicated token hidden states.
 
-    def __init__(self, config: ModelConfig) -> None:
+    Each rank owns a contiguous subset of experts. Router IDs stay global; a rank computes
+    only assignments that target its local experts, then all-reduce combines the partial
+    token outputs. This deliberately simple first EP implementation can later be replaced
+    by token all-to-all plus grouped GEMM without changing the surrounding MoE block.
+    """
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        expert_parallel: TensorParallelContext,
+    ) -> None:
         super().__init__()
         self.num_experts = config.num_experts
+        self.expert_parallel = expert_parallel
+        self.num_local_experts = expert_parallel.local_size(
+            config.num_experts,
+            "num_experts",
+        )
+        self.local_expert_start = expert_parallel.rank * self.num_local_experts
+        self.local_expert_end = self.local_expert_start + self.num_local_experts
         self.intermediate_size = config.moe_intermediate_size
         self.gate_up_proj = nn.Parameter(
             torch.empty(
-                config.num_experts,
+                self.num_local_experts,
                 2 * config.moe_intermediate_size,
                 config.hidden_size,
             )
         )
         self.down_proj = nn.Parameter(
             torch.empty(
-                config.num_experts,
+                self.num_local_experts,
                 config.hidden_size,
                 config.moe_intermediate_size,
             )
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        for expert_idx in range(self.num_local_experts):
+            nn.init.kaiming_uniform_(self.gate_up_proj[expert_idx], a=5**0.5)
+            nn.init.kaiming_uniform_(self.down_proj[expert_idx], a=5**0.5)
+
+    @property
+    def source_experts(self) -> slice:
+        return slice(self.local_expert_start, self.local_expert_end)
+
+    def local_index(self, global_expert_index: int) -> int | None:
+        if not self.local_expert_start <= global_expert_index < self.local_expert_end:
+            return None
+        return global_expert_index - self.local_expert_start
 
     def forward(
         self,
@@ -218,26 +250,30 @@ class Qwen3Experts(nn.Module):
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
         result = torch.zeros_like(hidden_states)
-        expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
-        for expert_idx in range(self.num_experts):
-            top_k_slot, token_idx = torch.where(expert_mask[expert_idx])
+        for local_expert_idx in range(self.num_local_experts):
+            global_expert_idx = self.local_expert_start + local_expert_idx
+            token_idx, top_k_slot = torch.where(selected_experts == global_expert_idx)
             if token_idx.numel() == 0:
                 continue
             current = hidden_states[token_idx]
-            gate, up = F.linear(current, self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
-            current = F.linear(F.silu(gate) * up, self.down_proj[expert_idx])
+            gate, up = F.linear(current, self.gate_up_proj[local_expert_idx]).chunk(2, dim=-1)
+            current = F.linear(F.silu(gate) * up, self.down_proj[local_expert_idx])
             current = current * routing_weights[token_idx, top_k_slot, None]
             result.index_add_(0, token_idx, current.to(result.dtype))
-        return result
+        return self.expert_parallel.all_reduce(result)
 
 
 class Qwen3SparseMoeBlock(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        expert_parallel: TensorParallelContext,
+    ) -> None:
         super().__init__()
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        self.experts = Qwen3Experts(config)
+        self.experts = Qwen3Experts(config, expert_parallel)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         original_shape = x.shape
@@ -270,7 +306,7 @@ class Qwen3DecoderLayer(nn.Module):
         super().__init__()
         self.self_attn = Qwen3Attention(config, layer_idx, backend, tensor_parallel)
         self.mlp = (
-            Qwen3SparseMoeBlock(config)
+            Qwen3SparseMoeBlock(config, tensor_parallel)
             if config.is_sparse_layer(layer_idx)
             else Qwen3MLP(config.hidden_size, config.intermediate_size, tensor_parallel)
         )
@@ -307,10 +343,6 @@ class Qwen3ForCausalLM(nn.Module):
         self.config = config
         self.attention_backend = attention_backend or TorchAttentionBackend()
         self.tensor_parallel = tensor_parallel or TensorParallelContext()
-        if config.is_moe and self.tensor_parallel.enabled:
-            raise NotImplementedError(
-                "MoE tensor parallelism is not implemented yet; validate dense TP first"
-            )
         self.kv_cache_num_heads = self.tensor_parallel.local_size(
             config.num_key_value_heads,
             "num_key_value_heads",

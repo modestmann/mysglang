@@ -27,7 +27,7 @@ class CheckpointLoadReport:
 
 @dataclass(frozen=True)
 class _Assignment:
-    target_name: str
+    target_name: str | None
     target_index: object
     part: str
     source_index: object = Ellipsis
@@ -106,6 +106,10 @@ def load_safetensors(model, model_path: str | Path) -> CheckpointLoadReport:
                         ignored.append(source_name)
                         continue
                     raise KeyError(f"unexpected checkpoint tensor: {source_name}")
+                if assignment.target_name is None:
+                    # Legacy MoE checkpoints store every expert separately. Do not even
+                    # materialize another EP rank's tensor from SafeTensors into host RAM.
+                    continue
                 _copy_assignment(
                     model,
                     assignment,
@@ -166,6 +170,15 @@ def _map_weight(model, source_name: str) -> _Assignment | None:
     if name in parameters:
         module_path, _, parameter_name = name.rpartition(".")
         module = model.get_submodule(module_path) if module_path else model
+        if parameter_name in {"gate_up_proj", "down_proj"} and hasattr(
+            module, "source_experts"
+        ):
+            return _Assignment(
+                name,
+                Ellipsis,
+                "full",
+                (module.source_experts, slice(None), slice(None)),
+            )
         if parameter_name == "weight" and isinstance(module, RowParallelLinear):
             return _Assignment(
                 name,
@@ -197,15 +210,21 @@ def _map_weight(model, source_name: str) -> _Assignment | None:
     if expert:
         prefix, expert_index_text, projection = expert.groups()
         expert_index = int(expert_index_text)
+        experts = model.get_submodule(prefix)
+        local_expert_index = experts.local_index(expert_index)
+        if local_expert_index is None:
+            # The tensor belongs to another EP rank. Recognize it without allocating
+            # permanent model storage or treating it as an unknown checkpoint key.
+            return _Assignment(None, Ellipsis, f"remote-expert-{expert_index}-{projection}")
         if projection == "down_proj":
             target_name = f"{prefix}.down_proj"
-            index = (expert_index, slice(None), slice(None))
+            index = (local_expert_index, slice(None), slice(None))
         else:
             target_name = f"{prefix}.gate_up_proj"
-            intermediate_size = model.get_submodule(prefix).intermediate_size
+            intermediate_size = experts.intermediate_size
             offset = 0 if projection == "gate_proj" else intermediate_size
             index = (
-                expert_index,
+                local_expert_index,
                 slice(offset, offset + intermediate_size),
                 slice(None),
             )
@@ -237,6 +256,8 @@ def _copy_assignment(
     coverage: dict[str, int],
     parts: set[tuple[str, str]],
 ) -> None:
+    if assignment.target_name is None:
+        return
     marker = (assignment.target_name, assignment.part)
     if marker in parts:
         raise ValueError(f"checkpoint initializes {assignment.target_name} part twice")

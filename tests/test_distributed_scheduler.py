@@ -160,6 +160,48 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                 join=True,
             )
 
+    @unittest.skipUnless(
+        dist.is_available() and dist.is_gloo_available(),
+        "requires torch.distributed with Gloo",
+    )
+    def test_moe_tp2_continuous_batching_matches_tp1(self) -> None:
+        torch.manual_seed(322)
+        config = ModelConfig(
+            model_type="qwen3_moe",
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=24,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=4,
+            max_position_embeddings=16,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=8,
+            norm_topk_prob=True,
+        )
+        reference = Qwen3ForCausalLM(config).eval()
+        state_dict = _hugging_face_layout(reference)
+        expected = {
+            "left": _reference_generate(reference, (1, 2, 3, 4, 5), 3),
+            "right": _reference_generate(reference, (6, 7), 2),
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(
+                _distributed_scheduler_worker,
+                args=(
+                    2,
+                    f"file://{directory}/process-group",
+                    config,
+                    state_dict,
+                    expected,
+                ),
+                nprocs=2,
+                join=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
