@@ -424,7 +424,6 @@ class Qwen3Experts(nn.Module):
         order = torch.argsort(dispatch_keys, stable=True)
         send_hidden = local_hidden[local_token_indices[order]]
         send_weights = local_routing.reshape(-1)[order]
-        send_token_indices = local_token_indices[order]
 
         send_expert_counts = torch.bincount(
             dispatch_keys,
@@ -460,12 +459,16 @@ class Qwen3Experts(nn.Module):
             input_split_sizes=recv_counts,
         )
 
-        local_result = torch.zeros_like(local_hidden)
-        local_result.index_add_(
-            0,
-            send_token_indices,
-            (returned_outputs * send_weights[:, None]).to(local_result.dtype),
-        )
+        # The transport order is grouped by destination/expert. Restore the original
+        # token-major top-k slot order before reducing expert contributions; otherwise
+        # BF16 addition order differs from the reference path and can perturb close logits.
+        weighted_outputs = torch.empty_like(returned_outputs)
+        weighted_outputs[order] = returned_outputs * send_weights[:, None]
+        local_result = weighted_outputs.view(
+            local_hidden.size(0),
+            top_k,
+            hidden_states.size(-1),
+        ).sum(dim=1)
         return parallel.all_gather_variable_first_dim(local_result, token_sizes)
 
     def _forward_sorted(
