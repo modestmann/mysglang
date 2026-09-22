@@ -127,10 +127,20 @@ async def _gpu_sampler(
             pass
 
 
-def _fixed_prompt_ids(service: Any, target: int) -> tuple[int, ...]:
+def _fixed_prompt_ids(
+    service: Any,
+    target: int,
+    prompt: str | None = None,
+) -> tuple[int, ...]:
     if target <= 0:
         raise ValueError("--prompt-tokens must be positive")
-    seed = tuple(service.tokenizer.encode("性能测试：请简洁介绍大语言模型推理。"))
+    seed = tuple(
+        service.tokenizer.encode(
+            prompt or "性能测试：请简洁介绍大语言模型推理。"
+        )
+    )
+    if not seed:
+        raise ValueError("--prompt must encode to at least one token")
     return (seed * ((target + len(seed) - 1) // len(seed)))[:target]
 
 
@@ -154,7 +164,7 @@ async def _one_batch(
     args: argparse.Namespace,
     output_tokens: int,
 ) -> tuple[list[dict[str, Any]], float]:
-    prompt_ids = _fixed_prompt_ids(service, args.prompt_tokens)
+    prompt_ids = _fixed_prompt_ids(service, args.prompt_tokens, args.prompt)
     sessions = [
         service._start_token_ids(
             prompt_ids,
@@ -255,6 +265,7 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "world_size": int(os.environ.get("WORLD_SIZE", "1")),
             "concurrency": args.concurrency,
             "prompt_tokens_per_request": args.prompt_tokens,
+            "prompt_override": args.prompt,
             "max_new_tokens_per_request": args.max_new_tokens,
             "num_pages": args.num_pages,
             "prefill_token_budget": args.prefill_token_budget,

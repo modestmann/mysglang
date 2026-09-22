@@ -70,6 +70,10 @@ PYTHONPATH=src .venv/bin/python benchmarks/benchmark_generation.py \
   --speculative-ngram-min-match 2 --speculative-ngram-max-match 8
 ```
 
+`--prompt` 可以换掉默认文本；脚本会将它的 token 序列重复/截断到
+`--prompt-tokens`，因此开/关两轮必须使用完全相同的该参数。测重复上界时可传入
+要求模型持续输出固定模式的指令；真实对话组仍使用默认 prompt。
+
 JSONL 的 scheduler 部分会记录 `speculative_draft_tokens`、
 `speculative_accepted_tokens`、`speculative_acceptance_rate` 和
 `speculative_verify_forwards`。确认 token 对齐后，再比较
