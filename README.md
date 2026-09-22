@@ -101,7 +101,8 @@ PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
 `torchrun` 创建四个进程并设置 `RANK`、`LOCAL_RANK` 和 `WORLD_SIZE`；每个进程绑定
 一张 GPU。只有 rank 0 加载 tokenizer、读取终端输入并打印结果，其他 rank 进入 TP
 worker loop。`--tensor-parallel-size` 是防止启动参数写错的校验项，不能替代
-`--nproc-per-node`。当前 TP 路径暂不支持 `--cuda-graph`。
+`--nproc-per-node`。`--cuda-graph` 可以捕获固定 B=1 Decode；TP 使用 NCCL Graph，MoE
+还必须选择 `--moe-dispatch triton_grouped`。这两条新路径仍待目标服务器实测。
 
 MoE 提供五条可对照路径：`naive` 为逐 expert 扫描基线；默认 `sorted` 一次筛选并按
 expert 分组，但仍逐 expert GEMM；`grouped` 将活跃 experts 填充成 batched matrices，
@@ -118,10 +119,10 @@ assignments，并将 gate/up GEMM 与 SwiGLU 融合，不再填充到最忙 expe
   token all-to-all reference 路径；旧两条路径的四卡实测均慢于 sorted，新的 Triton
   路径仍需在目标 CUDA 环境做 token oracle 和 A/B，当前不作为默认值；
 - 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
-- Scheduler 为单进程同步 step；纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 CUDA Graph，但 ragged/mixed metadata 仍由 Python 构造，尚未做调度/执行重叠；
+- 纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 dense/MoE、单卡/TP CUDA
+  Graph；TP/NCCL capture 尚待云端验证，ragged/mixed metadata 仍由 Python 构造；
 - 已完成 dense 模型级 TP、MoE expert 分片、checkpoint 分片加载、rank worker/batch-plan
-  广播和 `torchrun` CLI 启动链；尚待无 padding grouped kernel、多进程容错或正式
-  benchmark client；
+  广播和 `torchrun` CLI 启动链；尚待多进程容错或正式 benchmark client；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 
 这些限制属于明确的后续工作，不应被当前 reference 路径的正确性掩盖。

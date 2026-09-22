@@ -164,14 +164,22 @@ KV address    = pool[layer, 1, 2]
 
 普通 eager Decode 每轮都会由 Python 发起 embedding、各层 linear/attention/MLP、norm、LM head 和 argmax 等许多 kernel。小 batch 时计算本身较短，CPU/Python/CUDA driver 逐个提交 kernel 的固定开销可能变得显眼。CUDA Graph 会先记录这一串 GPU 操作及其依赖，之后用一次 `replay()` 重新提交整张图；它减少的是 launch overhead，不减少模型计算，也不消除 attention kernel 对 block table 的读取。
 
-这里的 **eager** 是执行方式：Python 运行到一个 PyTorch CUDA 算子，dispatcher 就立即把对应 kernel 提交到 GPU；它不表示单请求、不使用 batching，也不是一种 Prefill/Decode 调度策略。调度和执行是两条独立的轴：Scheduler 可以先组成纯 Prefill、纯 Decode 或混合 batch，然后选择用 eager 执行；只有满足捕获条件的纯 Decode batch 才改用 Graph replay。因此“MoE 动态 expert dispatch 走 eager”只表示每轮根据本次 router 结果正常执行算子，不表示 MoE 请求不能与其他请求组成 batch。
+这里的 **eager** 是执行方式：Python 运行到一个 PyTorch CUDA 算子，dispatcher 就立即把对应 kernel 提交到 GPU；它不表示单请求、不使用 batching，也不是一种 Prefill/Decode 调度策略。调度和执行是两条独立的轴：Scheduler 可以先组成纯 Prefill、纯 Decode 或混合 batch，然后选择用 eager 执行；只有满足捕获条件的纯 Decode batch 才改用 Graph replay。默认 sorted/padded MoE 的动态 dispatch 仍走 eager，只有固定槽位的 `triton_grouped` 可以尝试捕获。
 
 | 维度 | 决定的问题 | 当前选择 |
 |---|---|---|
 | 调度策略 | 本轮把哪些请求和哪些 Prefill/Decode token 放在一起 | continuous batching、chunked Prefill、允许 mixed batch |
 | 执行方式 | 选好的 batch 如何向 GPU 提交算子 | eager，或满足条件时 CUDA Graph replay |
 
-传统 CUDA Graph 要求捕获期间的算子序列、控制流，以及相关 tensor 的 shape、stride/layout 和显存地址保持一致；tensor 中的数值可以改变。限制不只针对 Q，而是覆盖 input、Q/K/V、中间激活、logits、block table 等整条捕获路径。纯 Decode 固定 `S=1`，按精确 `B` 建 bucket 后，Q 为固定的 `[B, heads, 1, head_dim]`；历史长度只是 `cache_seqlens` 中变化的数值，KV pool 和 block table buffer 的外形、地址仍固定。Prefill 的 packed token 总数 `T` 经常变化，会带动 Q 和所有中间激活变形；技术上可以为固定 `T` 建 bucket 或 padding，但当前收益较低且浪费较多，所以仍走 eager。MoE 每轮的 expert 选择和各 expert token 数又是数据依赖的动态形状，当前也不捕获 Graph。
+传统 CUDA Graph 要求捕获期间的算子序列、控制流，以及相关 tensor 的 shape、stride/layout 和显存地址保持一致；tensor 中的数值可以改变。限制不只针对 Q，而是覆盖 input、Q/K/V、中间激活、logits、block table 等整条捕获路径。纯 Decode 固定 `S=1`，按精确 `B` 建 bucket 后，Q 为固定的 `[B, heads, 1, head_dim]`；历史长度只是 `cache_seqlens` 中变化的数值，KV pool 和 block table buffer 的外形、地址仍固定。Prefill 的 packed token 总数 `T` 经常变化，会带动 Q 和所有中间激活变形；技术上可以为固定 `T` 建 bucket 或 padding，但当前收益较低且浪费较多，所以仍走 eager。
+
+MoE 的 expert 命中数虽然动态，但 `triton_grouped` 在 Graph warmup/capture 作用域内让每个
+TP rank 保留固定的 `B × top_k` assignment 槽位：本 rank 不拥有的 expert 使用 sentinel
+ID，kernel 输出零，最后由原有 all-reduce 合并。真实计算区间仍由 offsets 决定，tensor
+shape 和 launch grid 却不随路由结果变化。`argsort`、固定大小 counts/offsets、Triton
+kernels 和 NCCL all-reduce 因此可以进入 Graph；捕获结束立即恢复 compact dispatch，
+所以 Prefill 和 eager Decode 仍只整理本 rank 的真实 assignments。`sorted`、padded
+`grouped` 和 `all_to_all` 不允许捕获。
 
 Graph 要求 tensor 的形状和地址保持稳定，但每轮的 token、sequence length、页表内容和 request 顺序都会改变。因此纯 Decode 为每个精确 batch-size bucket 持有一套固定地址的 buffer：
 
@@ -240,6 +248,13 @@ assignment 的两倍，该路径会回退到逐活跃 expert GEMM，避免临时
 kernel 同时完成 gate GEMM、up GEMM 和 SwiGLU，只保留 `[assignments, moe_intermediate]`
 中间结果；第二遍完成 down GEMM。CPU、FP32 和 Gloo 测试走同语义的逐 expert reference，
 实际 Triton kernel 只用于 CUDA FP16/BF16。它在四卡实测前不是默认路径。
+
+这个边界对照了 mini-SGLang `9a91cfa`：它的普通 GraphRunner 只捕获 Decode，并把实际
+batch pad 到预定义 bucket；fused top-k 用 `num_token_non_padded` 将 dummy rows 的 expert
+ID 标为 `-1`，MoE kernel 再跳过这些行。mini-SGLang 的 MoE TP 保留所有 experts、切分
+expert intermediate width，而本项目按 rank 切分 experts，因此额外需要 non-local expert
+sentinel。正式 SGLang 也把 padded graph rows 与真实 token 数分开，并提供更复杂的 fused
+MoE/EP backend；这里保留教学所需的最小机制，不复制其完整生产执行栈。
 
 `all_to_all` 不建立新的 TP×EP mesh，而是复用相同 rank group：先将 flattened tokens 按
 连续区间指定给 source rank；source 将 top-k assignments 按 `(expert owner, local expert)`
@@ -389,10 +404,10 @@ torchrun --nproc-per-node=4
 ```
 
 单进程 `Scheduler` 会拒绝 TP model，防止只有 rank 0 进入 all-reduce 后永久等待。
-TP Decode CUDA Graph 也暂时被拒绝，因为 Graph 内 collective 的同步捕获尚未在 GPU
-上验证。CPU/Gloo 已覆盖 chunked Prefill、mixed batch、纯 Decode、token 对齐和结束后
-cache 完整性；`torchrun` 启动链已经接入，NCCL TP=2/4、故障超时和独立 Engine 进程
-仍待云端完成。
+TP Decode CUDA Graph 会让各 rank 在首次捕获前通过 NCCL barrier 对齐，然后分别捕获
+包含相同 NCCL collective 顺序的 rank-local Graph。控制面的 Gloo batch-plan/token 广播
+仍在 Graph 外执行。CPU/Gloo 已覆盖 chunked Prefill、mixed batch、纯 Decode、token
+对齐和结束后 cache 完整性；TP Graph 和 MoE Graph 的 NCCL/CUDA 实际捕获仍待云端验证。
 
 ## 7. Radix prefix cache
 
@@ -459,21 +474,22 @@ align_down(len(prompt) - 1, page_size)
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；尚无 fused MoE/TP Graph |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；已实现 Triton MoE/TP Graph，待云端验证 |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
 ## 9. 当前限制
 
 - 本地只有 dense Qwen3-0.6B checkpoint；真实 Qwen3-30B-A3B 已在云端完成一次可复现验收，原始结果已归档；
-- MoE 已有 replicated-token all-reduce、padded-batched grouped GEMM 和 token
-  all-to-all reference 路径；尚无 fused grouped kernel、独立 TP×EP mesh 或负载均衡优化；
+- MoE 已有 replicated-token all-reduce、padded-batched grouped GEMM、no-padding Triton
+  kernel 和 token all-to-all reference；尚无独立 TP×EP mesh 或负载均衡优化；
 - TP=1 使用单进程同步 worker；TP>1 目前镜像 Scheduler，尚未分离独立 Engine 进程，也没有 scheduler/forward overlap；
 - 纯 Decode metadata 已复用；ragged/mixed metadata 与 slot mapping 仍由 Python 构造，尚未做运行时性能调优；
 - reference attention 每轮 gather 历史 K/V；
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
-- CUDA Graph 目前只覆盖单 rank dense、greedy、精确纯 Decode bucket；尚未覆盖 TP 和生产容错；
+- CUDA Graph 代码覆盖 dense/MoE、单 rank/TP、greedy、精确纯 Decode bucket；MoE 仅支持
+  `triton_grouped`，TP/NCCL capture 尚待目标服务器验证，也没有生产容错；
 - dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
   grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
   vocab parallel、worker 超时与故障恢复尚未完成；

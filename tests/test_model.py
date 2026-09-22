@@ -166,6 +166,14 @@ class ModelRegressionTest(unittest.TestCase):
                 rtol=1e-5,
             )
 
+        triton_model = Qwen3ForCausalLM(config, moe_dispatch_backend="triton_grouped").eval()
+        triton_experts = triton_model.layers[0].mlp.experts
+        self.assertFalse(triton_experts.cuda_graph_static_dispatch)
+        triton_model.set_moe_cuda_graph_static_dispatch(True)
+        self.assertTrue(triton_experts.cuda_graph_static_dispatch)
+        triton_model.set_moe_cuda_graph_static_dispatch(False)
+        self.assertFalse(triton_experts.cuda_graph_static_dispatch)
+
         # Exercise the memory-safe skew fallback: padding four active experts to the
         # busiest expert would exceed twice the real assignment count.
         experts = optimized_model.layers[0].mlp.experts
@@ -194,6 +202,28 @@ class ModelRegressionTest(unittest.TestCase):
             atol=1e-5,
             rtol=1e-5,
         )
+
+        # Graph-stable TP dispatch keeps all batch * top-k slots. Assignments owned
+        # by another rank use sentinel IDs and must contribute exact zeros.
+        sentinel_experts = torch.tensor([-1, 0, config.num_experts, 2])
+        sentinel_inputs = torch.randn(4, config.hidden_size)
+        sentinel_outputs = experts._triton_grouped_expert_gemm(
+            sentinel_inputs,
+            sentinel_experts,
+        )
+        self.assertTrue(torch.equal(sentinel_outputs[[0, 2]], torch.zeros(2, config.hidden_size)))
+        for row, expert_idx in ((1, 0), (3, 2)):
+            gate, up = F.linear(
+                sentinel_inputs[row : row + 1],
+                experts.gate_up_proj[expert_idx],
+            ).chunk(2, dim=-1)
+            expected_row = F.linear(F.silu(gate) * up, experts.down_proj[expert_idx])
+            torch.testing.assert_close(
+                sentinel_outputs[row : row + 1],
+                expected_row,
+                atol=1e-5,
+                rtol=1e-5,
+            )
 
         # Older Qwen3MoE checkpoints store one gate/up/down tensor per expert instead of
         # Transformers 5's packed expert tensors. Both layouts feed the same runtime model.

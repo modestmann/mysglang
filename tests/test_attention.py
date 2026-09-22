@@ -16,6 +16,7 @@ from mysglang.cache import PagedKVCache
 from tests.helpers import drain_scheduler, make_request
 
 FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
+TRITON_AVAILABLE = importlib.util.find_spec("triton") is not None
 
 
 class AttentionBackendTest(unittest.TestCase):
@@ -252,6 +253,73 @@ class AttentionBackendTest(unittest.TestCase):
         self.assertEqual(flash_graph.stats.cuda_graph_captures, 1)
         self.assertEqual(flash_graph.stats.cuda_graph_replays, 3)
         flash_graph.check_integrity()
+
+    @unittest.skipUnless(
+        FLASH_ATTN_AVAILABLE and TRITON_AVAILABLE and torch.cuda.is_available(),
+        "requires CUDA, flash-attn and Triton",
+    )
+    @torch.inference_mode()
+    def test_moe_decode_cuda_graph_matches_eager(self) -> None:
+        config = ModelConfig(
+            model_type="qwen3_moe",
+            vocab_size=64,
+            hidden_size=128,
+            intermediate_size=256,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=512,
+            num_experts=4,
+            num_experts_per_tok=2,
+            moe_intermediate_size=64,
+            norm_topk_prob=True,
+        )
+        torch.manual_seed(2030)
+        eager_model = (
+            Qwen3ForCausalLM(
+                config,
+                attention_backend=FlashAttentionBackend(),
+                moe_dispatch_backend="triton_grouped",
+            )
+            .cuda()
+            .half()
+        )
+        graph_model = (
+            Qwen3ForCausalLM(
+                config,
+                attention_backend=FlashAttentionBackend(),
+                moe_dispatch_backend="triton_grouped",
+            )
+            .cuda()
+            .half()
+        )
+        graph_model.load_state_dict(eager_model.state_dict())
+        scheduler_base = dict(
+            max_running_requests=2,
+            prefill_token_budget=512,
+            num_pages=4,
+            page_size=256,
+        )
+        eager = Scheduler(eager_model, SchedulerConfig(**scheduler_base))
+        graph = Scheduler(
+            graph_model,
+            SchedulerConfig(
+                **scheduler_base,
+                decode_cuda_graph_batch_sizes=(2,),
+            ),
+        )
+        prompts = {
+            "moe-graph-left": list(range(1, 33)),
+            "moe-graph-right": list(range(20, 49)),
+        }
+        for scheduler in (eager, graph):
+            for request_id, prompt in prompts.items():
+                scheduler.add(make_request(request_id, prompt, max_new_tokens=4))
+
+        self.assertEqual(drain_scheduler(graph), drain_scheduler(eager))
+        self.assertEqual(graph.stats.cuda_graph_captures, 1)
+        self.assertEqual(graph.stats.cuda_graph_replays, 3)
+        graph.check_integrity()
 
     @staticmethod
     def _make_cache(model: Qwen3ForCausalLM, config: ModelConfig) -> PagedKVCache:

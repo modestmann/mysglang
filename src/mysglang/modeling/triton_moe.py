@@ -183,10 +183,19 @@ def triton_grouped_mlp(
     if down_proj.shape != (num_experts, hidden_size, intermediate_size):
         raise ValueError("down expert weights do not match the input shape")
 
-    order = torch.argsort(local_experts, stable=True)
+    # TP ranks see the same fixed M = batch * top_k assignments, but only own a
+    # data-dependent subset of experts.  A sentinel sorts non-local assignments to
+    # the end; their zero outputs keep every rank's tensor shapes graph-stable.
+    owned = (local_experts >= 0) & (local_experts < num_experts)
+    dispatch_experts = torch.where(owned, local_experts, num_experts)
+    order = torch.argsort(dispatch_experts, stable=True)
     sorted_inputs = inputs[order].contiguous()
-    sorted_experts = local_experts[order]
-    counts = torch.bincount(sorted_experts, minlength=num_experts).to(torch.int32)
+    counts = torch.zeros(num_experts, dtype=torch.int32, device=inputs.device)
+    counts.scatter_add_(
+        0,
+        local_experts.clamp(0, num_experts - 1),
+        owned.to(torch.int32),
+    )
     zero = torch.zeros(1, dtype=torch.int32, device=inputs.device)
     row_offsets = torch.cat((zero, counts.cumsum(0, dtype=torch.int32)))
 
@@ -219,7 +228,9 @@ def triton_grouped_mlp(
         num_warps=4,
     )
 
-    sorted_output = torch.empty_like(sorted_inputs)
+    # Invalid/sentinel rows are never visited by the kernels and must contribute zero
+    # when every TP rank later all-reduces its owned expert outputs.
+    sorted_output = torch.zeros_like(sorted_inputs)
     _grouped_down_kernel[(max_tiles, triton.cdiv(hidden_size, block_n))](
         activated,
         down_proj,

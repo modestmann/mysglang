@@ -215,6 +215,7 @@ class Qwen3Experts(nn.Module):
         self.num_experts = config.num_experts
         self.expert_parallel = expert_parallel
         self.dispatch_backend = dispatch_backend
+        self.cuda_graph_static_dispatch = False
         self.num_local_experts = expert_parallel.local_size(
             config.num_experts,
             "num_experts",
@@ -374,7 +375,7 @@ class Qwen3Experts(nn.Module):
         local_experts: torch.Tensor,
     ) -> torch.Tensor:
         """No-padding reference used when the Triton backend is selected off CUDA."""
-        output = torch.empty_like(inputs)
+        output = torch.zeros_like(inputs)
         for expert_idx in range(self.num_local_experts):
             indices = torch.where(local_experts == expert_idx)[0]
             if indices.numel() == 0:
@@ -412,6 +413,23 @@ class Qwen3Experts(nn.Module):
         """Compute this rank's replicated-token assignments with grouped expert GEMMs."""
         top_k = selected_experts.size(1)
         flat_experts = selected_experts.reshape(-1)
+        if use_triton and self.cuda_graph_static_dispatch:
+            # Keep exactly batch * top_k rows on every TP rank. Non-local experts use
+            # sentinel local IDs and produce zero; this removes data-dependent shapes
+            # so NCCL all-reduce and the whole Decode forward can enter CUDA Graph.
+            assignment_indices = torch.arange(flat_experts.numel(), device=flat_experts.device)
+            token_indices = torch.div(assignment_indices, top_k, rounding_mode="floor")
+            top_k_slots = assignment_indices.remainder(top_k)
+            local_experts = flat_experts - self.local_expert_start
+            current = self._triton_grouped_expert_gemm(
+                hidden_states[token_indices],
+                local_experts,
+            )
+            current = current * routing_weights[token_indices, top_k_slots, None]
+            result = torch.zeros_like(hidden_states)
+            result.index_add_(0, token_indices, current.to(result.dtype))
+            return result
+
         owned = (flat_experts >= self.local_expert_start) & (
             flat_experts < self.local_expert_end
         )
@@ -646,6 +664,7 @@ class Qwen3ForCausalLM(nn.Module):
         self.config = config
         self.attention_backend = attention_backend or TorchAttentionBackend()
         self.tensor_parallel = tensor_parallel or TensorParallelContext()
+        self.moe_dispatch_backend = moe_dispatch_backend
         self.kv_cache_num_heads = self.tensor_parallel.local_size(
             config.num_key_value_heads,
             "num_key_value_heads",
@@ -668,6 +687,12 @@ class Qwen3ForCausalLM(nn.Module):
     def tie_weights(self) -> None:
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
+
+    def set_moe_cuda_graph_static_dispatch(self, enabled: bool) -> None:
+        """Select fixed assignment slots only while a MoE Decode graph is captured."""
+        for layer in self.layers:
+            if isinstance(layer.mlp, Qwen3SparseMoeBlock):
+                layer.mlp.experts.cuda_graph_static_dispatch = enabled
 
     def reset_non_persistent_buffers(self, device: torch.device | str) -> None:
         for layer in self.layers:

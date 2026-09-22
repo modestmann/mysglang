@@ -97,10 +97,6 @@ class Scheduler:
                 "Tensor-parallel models require the distributed worker runtime; "
                 "the single-process Scheduler cannot drive collectives safely"
             )
-        if model.tensor_parallel.enabled and config.decode_cuda_graph_batch_sizes:
-            raise RuntimeError(
-                "TP Decode CUDA Graph capture is not implemented; use eager Decode first"
-            )
         self.model = model.eval()
         self.config = config
         self._coordinator = coordinator

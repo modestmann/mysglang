@@ -86,7 +86,11 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="new prompt tokens admitted per scheduler step; defaults to KV capacity",
     )
-    parser.add_argument("--cuda-graph", action="store_true", help="capture the greedy B=1 decode")
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="capture the greedy B=1 Decode, including NCCL TP and triton_grouped MoE",
+    )
     parser.add_argument(
         "--tensor-parallel-size",
         type=int,
@@ -205,9 +209,6 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         torch.bfloat16,
     }:
         raise ValueError("FlashAttention requires --dtype float16 or bfloat16")
-    if launch.world_size > 1 and args.cuda_graph:
-        raise ValueError("TP Decode CUDA Graph capture is not implemented yet")
-
     owns_process_group = False
     tensor_parallel = TensorParallelContext()
     control_group: dist.ProcessGroup | None = None

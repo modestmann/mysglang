@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 
 from mysglang.cache import PagedKVBatch, PagedKVCache, PagedKVDecodeBuffer
 
@@ -25,7 +26,7 @@ class DecodeCudaGraphStats:
 
 
 class DecodeCudaGraphRunner:
-    """Capture and replay exact-size, greedy, one-token Decode forwards."""
+    """Capture exact-size greedy Decode, including NCCL TP and static-shape MoE."""
 
     def __init__(
         self,
@@ -41,8 +42,14 @@ class DecodeCudaGraphRunner:
             raise RuntimeError("Decode CUDA Graph requires a CUDA model")
         if not isinstance(model.attention_backend, FlashAttentionBackend):
             raise RuntimeError("Decode CUDA Graph requires FlashAttentionBackend")
-        if model.config.is_moe:
-            raise RuntimeError("Decode CUDA Graph for dynamic MoE dispatch is not implemented")
+        if model.config.is_moe and model.moe_dispatch_backend != "triton_grouped":
+            raise RuntimeError(
+                "MoE Decode CUDA Graph requires --moe-dispatch triton_grouped"
+            )
+        if model.tensor_parallel.enabled:
+            backend = str(dist.get_backend(model.tensor_parallel.process_group))
+            if backend != "nccl":
+                raise RuntimeError("TP Decode CUDA Graph requires an NCCL model process group")
         if warmup_steps < 1:
             raise ValueError("warmup_steps must be positive")
         self.model = model
@@ -110,26 +117,44 @@ class DecodeCudaGraphRunner:
         capture_stream = torch.cuda.Stream(device=device)
         current_stream = torch.cuda.current_stream(device)
         capture_stream.wait_stream(current_stream)
-        with torch.cuda.stream(capture_stream):
-            # 预热阶段完成 lazy 初始化、workspace 分配和 kernel 选择。
-            for _ in range(self._warmup_steps):
+        # Eager Prefill/Decode continues to compact only rank-local assignments. Fixed
+        # batch * top-k slots are selected solely for the forward recorded below.
+        self.model.set_moe_cuda_graph_static_dispatch(True)
+        try:
+            with torch.cuda.stream(capture_stream):
+                # 预热阶段完成 lazy 初始化、workspace 分配和 kernel 选择。
+                for _ in range(self._warmup_steps):
+                    logits = self.model.forward_prepared(
+                        bucket.input_ids,
+                        kv_cache=self.cache,
+                        cache_batch=batch,
+                    )
+                    logits[:, -1].argmax(dim=-1)
+            capture_stream.synchronize()
+
+            # Every TP rank must begin capturing the same NCCL collective sequence. The
+            # scheduler already mirrors the batch; this barrier only aligns first capture.
+            if self.model.tensor_parallel.enabled:
+                device_index = device.index
+                if device_index is None:
+                    device_index = torch.cuda.current_device()
+                dist.barrier(
+                    group=self.model.tensor_parallel.process_group,
+                    device_ids=[device_index],
+                )
+                capture_stream.wait_stream(current_stream)
+
+            # 捕获稳定的 GPU 执行流。
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=capture_stream):
                 logits = self.model.forward_prepared(
                     bucket.input_ids,
                     kv_cache=self.cache,
                     cache_batch=batch,
                 )
-                logits[:, -1].argmax(dim=-1)
-        capture_stream.synchronize()
-
-        # 捕获稳定的 GPU 执行流。
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=capture_stream):
-            logits = self.model.forward_prepared(
-                bucket.input_ids,
-                kv_cache=self.cache,
-                cache_batch=batch,
-            )
-            output_token_ids = logits[:, -1].argmax(dim=-1)
+                output_token_ids = logits[:, -1].argmax(dim=-1)
+        finally:
+            self.model.set_moe_cuda_graph_static_dispatch(False)
         current_stream.wait_stream(capture_stream)
         bucket.graph = graph
         bucket.output_token_ids = output_token_ids
