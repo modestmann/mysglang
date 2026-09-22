@@ -153,10 +153,21 @@ class Scheduler:
         self._speculative_verify_forwards = 0
         self._speculative_draft_tokens = 0
         self._speculative_accepted_tokens = 0
+        self._closed = False
 
     @property
     def has_work(self) -> bool:
         return bool(self._entries)
+
+    def close(self) -> None:
+        """Release runtime-only resources while CUDA/NCCL are still available."""
+        if self._closed:
+            return
+        if self.has_work:
+            raise RuntimeError("cannot close Scheduler while requests are active")
+        if self._cuda_graph_runner is not None:
+            self._cuda_graph_runner.close()
+        self._closed = True
 
     @property
     def prefill_input_tokens(self) -> int:

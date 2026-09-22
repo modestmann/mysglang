@@ -232,6 +232,21 @@ per-session trie，并可以生成 token tree 让主模型一次验证；这会�
 但也需要 tree attention metadata 和淘汰策略。所查看的 mini-SGLang 教学版本没有投机路径。
 本实现与 SGLang 共享“会话历史草稿 + 主模型验证”边界，但先只实现一条线性候选链。
 
+#### “主模型验证”不等于不同 kernel 下逐位相同
+
+投机路径不会相信 n-gram 猜测：每个候选仍由目标模型 logits 验证，所以接受规则和
+KV 回滚在算法上是精确的。但关闭投机时的单 token Decode 使用
+`flash_attn_with_kvcache`，投机验证使用 packed/varlen attention；二者在 BF16 下可能有
+不同的分块、累加和归约顺序。若两个 token 的 logits 极其接近，最后几位舍入差异可能
+改变 greedy `argmax`，随后两次生成会走向不同但都有效的分支。这属于 kernel 数值路径
+差异，不应在未排查前归因于请求串扰或 KV 回滚错误。
+
+因此验收分三层：先用 Torch attention 检查 eager/投机的逐 token 精确一致，以覆盖
+Scheduler、packed 分段和 KV 回滚；再用 FA2 检查单请求精确一致；最后对并发 FA2 保存
+首次分叉位置，并把不同 kernel 的结果称为数值等价生成，而不是宣称 bitwise greedy
+一致。若产品必须保证逐 token 重现，需要让基线和 verifier 走同一种 kernel/精度，代价
+通常是放弃部分 packed verification 性能。
+
 ## 5. 真实 Qwen3、MoE 与 tokenizer
 
 `Qwen3ForCausalLM` 同时承载 dense Qwen3 和 Qwen3MoE。配置显式保存 `head_dim`，不能再假设它等于 `hidden_size / num_attention_heads`：本地 Qwen3-0.6B 的 hidden size 是 1024，但 16 个 query heads 的 head dimension 是 128，因此 Q projection 实际宽度为 2048。
@@ -511,7 +526,7 @@ align_down(len(prompt) - 1, page_size)
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；已实现 Triton MoE/TP Graph，待云端验证 |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；Triton MoE/TP Graph/n-gram 均已四卡实测 |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
@@ -526,7 +541,7 @@ align_down(len(prompt) - 1, page_size)
 - page 数量显式配置，没有根据实时显存自动计算；
 - 没有 active-request preemption、swap、cache namespace 或跨实例 cache routing；
 - CUDA Graph 代码覆盖 dense/MoE、单 rank/TP、greedy、精确纯 Decode bucket；MoE 仅支持
-  `triton_grouped`，TP/NCCL capture 尚待目标服务器验证，也没有生产容错；
+  `triton_grouped`，TP/NCCL capture 和 Graph 释放已在 4×RTX 4090 验证，但没有生产容错；
 - dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
   grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
   vocab parallel、worker 超时与故障恢复尚未完成；

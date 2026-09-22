@@ -75,6 +75,19 @@ class DecodeCudaGraphRunner:
     def supports(self, batch_size: int) -> bool:
         return batch_size in self._batch_sizes
 
+    def close(self) -> None:
+        """Release captured graphs before their NCCL process group is destroyed."""
+        if not any(bucket.graph is not None for bucket in self._buckets.values()):
+            return
+        device = next(iter(self._buckets.values())).input_ids.device
+        torch.cuda.synchronize(device)
+        for bucket in self._buckets.values():
+            if bucket.graph is not None:
+                bucket.graph.reset()
+            bucket.graph = None
+            bucket.output_token_ids = None
+        torch.cuda.synchronize(device)
+
     @torch.inference_mode()
     def run(
         self,

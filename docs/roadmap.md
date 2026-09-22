@@ -99,10 +99,10 @@
 
 当前单进程 `Scheduler` 仍会拒绝 TP model；TP 必须通过 `TensorParallelScheduler` 让所有
 rank 同步进入 collective。已接入 TP NCCL CUDA Graph，并让 `triton_grouped` 通过固定
-`batch × top_k` assignment 槽位支持 MoE Graph；CUDA/NCCL capture 和跨 rank 故障恢复
-仍待云端验证。真实
-Qwen3-30B-A3B 的四卡显存、token、吞吐及 sorted/grouped/all-to-all A/B 均已完成。
-不再扩展 TP×EP mesh；下一轮云端测试应逐项启用 Triton、TP Graph 与 MoE Graph。
+`batch × top_k` assignment 槽位支持 MoE Graph；真实四卡 CUDA/NCCL capture、退出时
+先释放 Graph 再销毁 process group，以及无残留显存均已验证。跨 rank 超时与故障恢复
+仍未完成。真实 Qwen3-30B-A3B 的四卡显存、token、吞吐、sorted/grouped/all-to-all、
+Triton、MoE Graph 与 n-gram A/B 均已完成。不再扩展 TP×EP mesh。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 

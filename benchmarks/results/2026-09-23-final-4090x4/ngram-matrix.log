@@ -1,0 +1,480 @@
+RUN moe-ngram-off-c1-r1
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank [Gloo] Rank 10 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 13.823482368141413,
+  "requests_per_s": 0.0723406717184862,
+  "output_tokens": 128,
+  "output_tokens_per_s": 9.259605979966233,
+  "ttft_ms": {
+    "mean": 119.47398260235786,
+    "p50": 119.47398260235786,
+    "p95": 119.47398260235786,
+    "max": 119.47398260235786
+  },
+  "itl_ms": {
+    "mean": 107.903975172071,
+    "p50": 106.56320676207542,
+    "p95": 123.13374504446983,
+    "max": 131.49016723036766
+  },
+  "e2e_ms": {
+    "mean": 13823.278829455376,
+    "p50": 13823.278829455376,
+    "p95": 13823.278829455376,
+    "max": 13823.278829455376
+  },
+  "rank0_peak_torch_allocated_mib": 15862.55615234375,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-on-c1-r1
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank [Gloo] Rank 01 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[Gloo] Rank [Gloo] Rank 32 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 12.299954075366259,
+  "requests_per_s": 0.0813011165629269,
+  "output_tokens": 128,
+  "output_tokens_per_s": 10.406542920054644,
+  "ttft_ms": {
+    "mean": 120.46396732330322,
+    "p50": 120.46396732330322,
+    "p95": 120.46396732330322,
+    "max": 120.46396732330322
+  },
+  "itl_ms": {
+    "mean": 95.89835596600855,
+    "p50": 109.74158346652985,
+    "p95": 125.71663782000542,
+    "max": 148.76455441117287
+  },
+  "e2e_ms": {
+    "mean": 12299.55517500639,
+    "p50": 12299.55517500639,
+    "p95": 12299.55517500639,
+    "max": 12299.55517500639
+  },
+  "rank0_peak_torch_allocated_mib": 15865.498046875,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-off-c8-r1
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2[Gloo] Rank  is connected to 33 is connected to  peer ranks. 3Expected number of connected peer ranks is :  peer ranks. 3Expected number of connected peer ranks is : 
+3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 15.082599449902773,
+  "requests_per_s": 0.5304125476892891,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 67.89280610422901,
+  "ttft_ms": {
+    "mean": 147.61699922382832,
+    "p50": 147.62844517827034,
+    "p95": 147.66875654459,
+    "max": 147.66875654459
+  },
+  "itl_ms": {
+    "mean": 117.58851951105505,
+    "p50": 116.10142886638641,
+    "p95": 132.05397501587868,
+    "max": 146.96713536977768
+  },
+  "e2e_ms": {
+    "mean": 15081.35897712782,
+    "p50": 15081.43599331379,
+    "p95": 15081.7461758852,
+    "max": 15081.7461758852
+  },
+  "rank0_peak_torch_allocated_mib": 15877.25048828125,
+  "rank0_peak_torch_reserved_mib": 16120.0
+}
+RUN moe-ngram-on-c8-r1
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank [Gloo] Rank 21 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 13.582180172204971,
+  "requests_per_s": 0.5890070591444124,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 75.39290357048479,
+  "ttft_ms": {
+    "mean": 139.97287023812532,
+    "p50": 139.98395577073097,
+    "p95": 140.02249762415886,
+    "max": 140.02249762415886
+  },
+  "itl_ms": {
+    "mean": 102.73840733781809,
+    "p50": 114.75219950079918,
+    "p95": 127.98850238323212,
+    "max": 186.04228645563126
+  },
+  "e2e_ms": {
+    "mean": 13187.750602141023,
+    "p50": 13460.608053952456,
+    "p95": 13581.892393529415,
+    "max": 13581.892393529415
+  },
+  "rank0_peak_torch_allocated_mib": 15895.513671875,
+  "rank0_peak_torch_reserved_mib": 16120.0
+}
+RUN moe-ngram-on-c1-r2
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank [Gloo] Rank 23 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 13.24364060536027,
+  "requests_per_s": 0.07550793847390098,
+  "output_tokens": 128,
+  "output_tokens_per_s": 9.665016124659326,
+  "ttft_ms": {
+    "mean": 129.55394014716148,
+    "p50": 129.55394014716148,
+    "p95": 129.55394014716148,
+    "max": 129.55394014716148
+  },
+  "itl_ms": {
+    "mean": 103.25681086717628,
+    "p50": 113.25741559267044,
+    "p95": 130.24870678782463,
+    "max": 168.2150773704052
+  },
+  "e2e_ms": {
+    "mean": 13243.16892027855,
+    "p50": 13243.16892027855,
+    "p95": 13243.16892027855,
+    "max": 13243.16892027855
+  },
+  "rank0_peak_torch_allocated_mib": 15865.498046875,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-off-c1-r2
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank [Gloo] Rank 02 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 13.922254368662834,
+  "requests_per_s": 0.07182744787732571,
+  "output_tokens": 128,
+  "output_tokens_per_s": 9.193913328297691,
+  "ttft_ms": {
+    "mean": 119.17493492364883,
+    "p50": 119.17493492364883,
+    "p95": 119.17493492364883,
+    "max": 119.17493492364883
+  },
+  "itl_ms": {
+    "mean": 108.68233603637988,
+    "p50": 107.00925812125206,
+    "p95": 114.60212990641594,
+    "max": 176.91635340452194
+  },
+  "e2e_ms": {
+    "mean": 13921.831611543894,
+    "p50": 13921.831611543894,
+    "p95": 13921.831611543894,
+    "max": 13921.831611543894
+  },
+  "rank0_peak_torch_allocated_mib": 15862.55615234375,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-on-c8-r2
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank [Gloo] Rank 12 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 14.519449267536402,
+  "requests_per_s": 0.550985085769538,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 70.52609097850086,
+  "ttft_ms": {
+    "mean": 144.02046892791986,
+    "p50": 144.03174445033073,
+    "p95": 144.0722569823265,
+    "max": 144.0722569823265
+  },
+  "itl_ms": {
+    "mean": 106.45192409095567,
+    "p50": 119.69504505395889,
+    "p95": 134.44304838776588,
+    "max": 156.48441389203072
+  },
+  "e2e_ms": {
+    "mean": 13663.41482847929,
+    "p50": 13924.190990626812,
+    "p95": 14519.091680645943,
+    "max": 14519.091680645943
+  },
+  "rank0_peak_torch_allocated_mib": 15892.0205078125,
+  "rank0_peak_torch_reserved_mib": 16120.0
+}
+RUN moe-ngram-off-c8-r2
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank [Gloo] Rank 30 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 14.359930284321308,
+  "requests_per_s": 0.5571057687330621,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 71.30953839783194,
+  "ttft_ms": {
+    "mean": 137.09925021976233,
+    "p50": 137.11051642894745,
+    "p95": 137.14967295527458,
+    "max": 137.14967295527458
+  },
+  "itl_ms": {
+    "mean": 111.98462426339782,
+    "p50": 111.1794225871563,
+    "p95": 116.92269146442413,
+    "max": 131.84694200754166
+  },
+  "e2e_ms": {
+    "mean": 14359.146531671286,
+    "p50": 14359.215896576643,
+    "p95": 14359.505735337734,
+    "max": 14359.505735337734
+  },
+  "rank0_peak_torch_allocated_mib": 15877.26611328125,
+  "rank0_peak_torch_reserved_mib": 16120.0
+}
+RUN moe-ngram-off-c1-r3
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to [Gloo] Rank 3 peer ranks. 1Expected number of connected peer ranks is :  is connected to 33
+ peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 13.868178196251392,
+  "requests_per_s": 0.0721075245680289,
+  "output_tokens": 128,
+  "output_tokens_per_s": 9.229763144707698,
+  "ttft_ms": {
+    "mean": 122.36691638827324,
+    "p50": 122.36691638827324,
+    "p95": 122.36691638827324,
+    "max": 122.36691638827324
+  },
+  "itl_ms": {
+    "mean": 108.23134793423293,
+    "p50": 106.27954825758934,
+    "p95": 120.1280988752842,
+    "max": 175.48879235982895
+  },
+  "e2e_ms": {
+    "mean": 13867.748104035854,
+    "p50": 13867.748104035854,
+    "p95": 13867.748104035854,
+    "max": 13867.748104035854
+  },
+  "rank0_peak_torch_allocated_mib": 15862.55615234375,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-on-c1-r3
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : [Gloo] Rank 33
+ is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 12.333683758974075,
+  "requests_per_s": 0.08107877739871455,
+  "output_tokens": 128,
+  "output_tokens_per_s": 10.378083507035463,
+  "ttft_ms": {
+    "mean": 124.0156777203083,
+    "p50": 124.0156777203083,
+    "p95": 124.0156777203083,
+    "max": 124.0156777203083
+  },
+  "itl_ms": {
+    "mean": 96.13553062081337,
+    "p50": 111.00087687373161,
+    "p95": 121.04784697294235,
+    "max": 177.2305816411972
+  },
+  "e2e_ms": {
+    "mean": 12333.228066563606,
+    "p50": 12333.228066563606,
+    "p95": 12333.228066563606,
+    "max": 12333.228066563606
+  },
+  "rank0_peak_torch_allocated_mib": 15865.498046875,
+  "rank0_peak_torch_reserved_mib": 16114.0
+}
+RUN moe-ngram-off-c8-r3
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank [Gloo] Rank 02 is connected to  is connected to 33 peer ranks.  peer ranks. Expected number of connected peer ranks is : Expected number of connected peer ranks is : 33
+
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 14.527516134083271,
+  "requests_per_s": 0.5506791337323697,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 70.48692911774332,
+  "ttft_ms": {
+    "mean": 137.39331671968102,
+    "p50": 137.4046802520752,
+    "p95": 137.44383677840233,
+    "max": 137.44383677840233
+  },
+  "itl_ms": {
+    "mean": 113.30288995101344,
+    "p50": 111.95338144898415,
+    "p95": 118.76556649804115,
+    "max": 131.5719671547413
+  },
+  "e2e_ms": {
+    "mean": 14526.860340498388,
+    "p50": 14526.928927749395,
+    "p95": 14527.212746441364,
+    "max": 14527.212746441364
+  },
+  "rank0_peak_torch_allocated_mib": 15877.25048828125,
+  "rank0_peak_torch_reserved_mib": 16120.0
+}
+RUN moe-ngram-on-c8-r3
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to [Gloo] Rank 3 peer ranks. 2Expected number of connected peer ranks is :  is connected to 33
+ peer ranks. Expected number of connected peer ranks is : 3
+[TP rank 1/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:1 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 0/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:0 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 3/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:3 as torch.bfloat16 with flash-attn-2 ...
+[TP rank 2/4] Loading /root/autodl-tmp/models/Qwen3-30B-A3B on cuda:2 as torch.bfloat16 with flash-attn-2 ...
+{
+  "output": "benchmarks/results/2026-09-23-final-4090x4/qwen3-30b-a3b.jsonl",
+  "elapsed_s": 14.004466246813536,
+  "requests_per_s": 0.5712463337772874,
+  "output_tokens": 1024,
+  "output_tokens_per_s": 73.11953072349279,
+  "ttft_ms": {
+    "mean": 148.45703961327672,
+    "p50": 148.47386628389359,
+    "p95": 148.51291850209236,
+    "max": 148.51291850209236
+  },
+  "itl_ms": {
+    "mean": 102.6050086631843,
+    "p50": 117.47602373361588,
+    "p95": 141.14712923765182,
+    "max": 190.61196967959404
+  },
+  "e2e_ms": {
+    "mean": 13179.293139837682,
+    "p50": 13639.875914901495,
+    "p95": 14004.20007109642,
+    "max": 14004.20007109642
+  },
+  "rank0_peak_torch_allocated_mib": 15895.513671875,
+  "rank0_peak_torch_reserved_mib": 16118.0
+}

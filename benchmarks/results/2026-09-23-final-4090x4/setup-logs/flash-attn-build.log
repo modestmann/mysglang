@@ -1,0 +1,7 @@
+Using Python 3.12.3 environment at: autodl-tmp/mysglang/.venv
+Resolved 1 package in 2ms
+   Building flash-attn==2.8.3.post1
+      Built flash-attn==2.8.3.post1
+Prepared 1 package in 9m 43s
+Installed 1 package in 149ms
+ + flash-attn==2.8.3.post1

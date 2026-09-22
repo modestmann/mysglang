@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -9,6 +9,19 @@ from tests.helpers import drain_scheduler, make_model, make_request, reference_g
 
 
 class SchedulerTest(unittest.TestCase):
+    def test_close_releases_cuda_graph_runner_and_is_idempotent(self) -> None:
+        scheduler = Scheduler(
+            make_model(),
+            SchedulerConfig(num_pages=8, page_size=2),
+        )
+        runner = Mock()
+        scheduler._cuda_graph_runner = runner
+
+        scheduler.close()
+        scheduler.close()
+
+        runner.close.assert_called_once_with()
+
     def test_cuda_graph_buckets_must_be_exact_valid_sizes(self) -> None:
         with self.assertRaisesRegex(ValueError, "sorted and unique"):
             SchedulerConfig(decode_cuda_graph_batch_sizes=(2, 1))

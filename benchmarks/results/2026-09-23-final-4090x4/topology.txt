@@ -1,0 +1,1287 @@
+=== timestamp ===
+2026-09-23T00:12:18+08:00
+=== hostname/kernel/os ===
+autodl-container-9b0546a9a5-84b0e924
+Linux autodl-container-9b0546a9a5-84b0e924 5.15.0-91-generic #101-Ubuntu SMP Tue Nov 14 13:30:08 UTC 2023 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="22.04"
+VERSION="22.04.5 LTS (Jammy Jellyfish)"
+VERSION_CODENAME=jammy
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=jammy
+=== nvidia-smi summary ===
+Wed Sep 23 00:12:18 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4090        On  |   00000000:23:00.0 Off |                  Off |
+| 36%   34C    P8             12W /  450W |       0MiB /  24564MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA GeForce RTX 4090        On  |   00000000:35:00.0 Off |                  Off |
+| 36%   33C    P8             17W /  450W |       0MiB /  24564MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA GeForce RTX 4090        On  |   00000000:36:00.0 Off |                  Off |
+| 37%   35C    P8             12W /  450W |       0MiB /  24564MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA GeForce RTX 4090        On  |   00000000:39:00.0 Off |                  Off |
+| 36%   36C    P8             14W /  450W |       0MiB /  24564MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== nvidia-smi -L ===
+GPU 0: NVIDIA GeForce RTX 4090 (UUID: GPU-17f54e78-ccb5-74a2-35c1-806d9ba8928a)
+GPU 1: NVIDIA GeForce RTX 4090 (UUID: GPU-28d6c0d7-bfc5-07cb-c146-be4ea6836f18)
+GPU 2: NVIDIA GeForce RTX 4090 (UUID: GPU-98b1e63f-c1f1-fab3-d70c-2c4726df2a3c)
+GPU 3: NVIDIA GeForce RTX 4090 (UUID: GPU-f774d16e-b6a6-ea61-0870-617b7b40a636)
+=== GPU query ===
+index, name, uuid, pci.bus_id, driver_version, pstate, temperature.gpu, power.draw [W], power.limit [W], memory.total [MiB], memory.used [MiB]
+0, NVIDIA GeForce RTX 4090, GPU-17f54e78-ccb5-74a2-35c1-806d9ba8928a, 00000000:23:00.0, 580.95.05, P8, 34, 12.18 W, 450.00 W, 24564 MiB, 0 MiB
+1, NVIDIA GeForce RTX 4090, GPU-28d6c0d7-bfc5-07cb-c146-be4ea6836f18, 00000000:35:00.0, 580.95.05, P8, 33, 17.37 W, 450.00 W, 24564 MiB, 0 MiB
+2, NVIDIA GeForce RTX 4090, GPU-98b1e63f-c1f1-fab3-d70c-2c4726df2a3c, 00000000:36:00.0, 580.95.05, P8, 35, 12.43 W, 450.00 W, 24564 MiB, 0 MiB
+3, NVIDIA GeForce RTX 4090, GPU-f774d16e-b6a6-ea61-0870-617b7b40a636, 00000000:39:00.0, 580.95.05, P8, 36, 14.20 W, 450.00 W, 24564 MiB, 0 MiB
+=== nvidia-smi topo -m ===
+	[4mGPU0	GPU1	GPU2	GPU3	NIC0	NIC1	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	NODE	NODE	NODE	SYS	SYS	0-31,64-95	0		N/A
+GPU1	NODE	 X 	PIX	PXB	SYS	SYS	0-31,64-95	0		N/A
+GPU2	NODE	PIX	 X 	PXB	SYS	SYS	0-31,64-95	0		N/A
+GPU3	NODE	PXB	PXB	 X 	SYS	SYS	0-31,64-95	0		N/A
+NIC0	SYS	SYS	SYS	SYS	 X 	PIX				
+NIC1	SYS	SYS	SYS	SYS	PIX	 X 				
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+
+NIC Legend:
+
+  NIC0: mlx5_0
+  NIC1: mlx5_1
+
+=== nvidia-smi topo -p2p p ===
+ 	[4mGPU0	GPU1	GPU2	GPU3	[0m
+ GPU0	X	NS	NS	NS	
+ GPU1	NS	X	NS	NS	
+ GPU2	NS	NS	X	NS	
+ GPU3	NS	NS	NS	X	
+
+Legend:
+
+  X    = Self
+  OK   = Status Ok
+  CNS  = Chipset not supported
+  GNS  = GPU not supported
+  TNS  = Topology not supported
+  NS   = Not supported
+  U    = Unknown
+=== nvidia-smi topo -p2p r ===
+ 	[4mGPU0	GPU1	GPU2	GPU3	[0m
+ GPU0	X	CNS	CNS	CNS	
+ GPU1	CNS	X	CNS	CNS	
+ GPU2	CNS	CNS	X	CNS	
+ GPU3	CNS	CNS	CNS	X	
+
+Legend:
+
+  X    = Self
+  OK   = Status Ok
+  CNS  = Chipset not supported
+  GNS  = GPU not supported
+  TNS  = Topology not supported
+  NS   = Not supported
+  U    = Unknown
+=== CUDA compiler/runtime hints ===
+	libnccl.so.2 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnccl.so.2
+	libnccl.so (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnccl.so
+	libcudart.so.12 (libc6,x86-64) => /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.12
+	libcudart.so (libc6,x86-64) => /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
+	libcudadebugger.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcudadebugger.so.1
+	libcuda.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcuda.so.1
+	libcuda.so (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcuda.so
+=== lspci tree ===
+bash: line 27: lspci: command not found
+=== lspci NVIDIA/root ports ===
+=== CPU/NUMA lscpu ===
+Architecture:                       x86_64
+CPU op-mode(s):                     32-bit, 64-bit
+Address sizes:                      52 bits physical, 57 bits virtual
+Byte Order:                         Little Endian
+CPU(s):                             128
+On-line CPU(s) list:                0-127
+Vendor ID:                          GenuineIntel
+Model name:                         Intel(R) Xeon(R) Platinum 8352V CPU @ 2.10GHz
+CPU family:                         6
+Model:                              106
+Thread(s) per core:                 2
+Core(s) per socket:                 32
+Socket(s):                          2
+Stepping:                           6
+CPU max MHz:                        3500.0000
+CPU min MHz:                        800.0000
+BogoMIPS:                           4000.00
+Flags:                              fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb cat_l3 invpcid_single intel_ppin ssbd mba ibrs ibpb stibp ibrs_enhanced tpr_shadow vnmi flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb intel_pt avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local split_lock_detect wbnoinvd dtherm ida arat pln pts hwp hwp_act_window hwp_epp hwp_pkg_req avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq la57 rdpid fsrm md_clear pconfig flush_l1d arch_capabilities
+Virtualization:                     VT-x
+L1d cache:                          3 MiB (64 instances)
+L1i cache:                          2 MiB (64 instances)
+L2 cache:                           80 MiB (64 instances)
+L3 cache:                           108 MiB (2 instances)
+NUMA node(s):                       2
+NUMA node0 CPU(s):                  0-31,64-95
+NUMA node1 CPU(s):                  32-63,96-127
+Vulnerability Gather data sampling: Mitigation; Microcode
+Vulnerability Itlb multihit:        Not affected
+Vulnerability L1tf:                 Not affected
+Vulnerability Mds:                  Not affected
+Vulnerability Meltdown:             Not affected
+Vulnerability Mmio stale data:      Mitigation; Clear CPU buffers; SMT vulnerable
+Vulnerability Retbleed:             Not affected
+Vulnerability Spec rstack overflow: Not affected
+Vulnerability Spec store bypass:    Mitigation; Speculative Store Bypass disabled via prctl and seccomp
+Vulnerability Spectre v1:           Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:           Mitigation; Enhanced IBRS, IBPB conditional, RSB filling, PBRSB-eIBRS SW sequence
+Vulnerability Srbds:                Not affected
+Vulnerability Tsx async abort:      Not affected
+=== numactl --hardware ===
+bash: line 33: numactl: command not found
+=== sysfs GPU NUMA/local CPU ===
+0000:1b:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:1c:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:1f:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:23:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:35:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:36:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:39:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=2.5 GT/s PCIe
+ link_width=16
+0000:3d:00.0 numa=0
+ local_cpulist=0-31,64-95
+ link_speed=16.0 GT/s PCIe
+ link_width=16
+=== IOMMU groups for NVIDIA GPU functions ===
+0000:1b:00.0 iommu_group=0000:1b:00.1 iommu_group=0000:1c:00.0 iommu_group=0000:1c:00.1 iommu_group=0000:1f:00.0 iommu_group=0000:1f:00.1 iommu_group=0000:23:00.0 iommu_group=0000:23:00.1 iommu_group=0000:35:00.0 iommu_group=0000:35:00.1 iommu_group=0000:36:00.0 iommu_group=0000:36:00.1 iommu_group=0000:39:00.0 iommu_group=0000:39:00.1 iommu_group=0000:3d:00.0 iommu_group=0000:3d:00.1 iommu_group==== processes / utilization before smoke ===
+# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command 
+# Idx           #    C/G      %      %      %      %      %      %    name 
+    0          -     -      -      -      -      -      -      -    -              
+    1          -     -      -      -      -      -      -      -    -              
+    2          -     -      -      -      -      -      -      -    -              
+    3          -     -      -      -      -      -      -      -    -              
+=== sysfs PCI ancestry for visible GPUs ===
+0000:23:00.0 -> /sys/devices/pci0000:16/0000:16:02.0/0000:17:00.0/0000:18:08.0/0000:21:00.0/0000:22:10.0/0000:23:00.0
+ vendor/device/subvendor/subdevice/class: 0x10de
+0x2684
+0x10de
+0x16f3
+0x030000
+ current/max PCIe: 2.5 GT/s PCIe
+16
+16.0 GT/s PCIe
+16
+0000:35:00.0 -> /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:00.0/0000:33:00.0/0000:34:00.0/0000:35:00.0
+ vendor/device/subvendor/subdevice/class: 0x10de
+0x2684
+0x10de
+0x16f3
+0x030000
+ current/max PCIe: 2.5 GT/s PCIe
+16
+16.0 GT/s PCIe
+16
+0000:36:00.0 -> /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:00.0/0000:33:00.0/0000:34:10.0/0000:36:00.0
+ vendor/device/subvendor/subdevice/class: 0x10de
+0x2684
+0x10de
+0x16f3
+0x030000
+ current/max PCIe: 2.5 GT/s PCIe
+16
+16.0 GT/s PCIe
+16
+0000:39:00.0 -> /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:04.0/0000:37:00.0/0000:38:00.0/0000:39:00.0
+ vendor/device/subvendor/subdevice/class: 0x10de
+0x2684
+0x10de
+0x16f3
+0x030000
+ current/max PCIe: 2.5 GT/s PCIe
+16
+16.0 GT/s PCIe
+16
+=== sysfs PCI bridge detail on visible GPU ancestor paths ===
+0000:34:00.0 class=0x060400 vendor=0x1000 device=0xc010 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:37:00.0 class=0x060400 vendor=0x1000 device=0xc010 numa=0 cur=16.0 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:38:00.0 class=0x060400 vendor=0x1000 device=0xc010 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:23:00.0 class=0x030000 vendor=0x10de device=0x2684 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:35:00.0 class=0x030000 vendor=0x10de device=0x2684 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:36:00.0 class=0x030000 vendor=0x10de device=0x2684 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+0000:39:00.0 class=0x030000 vendor=0x10de device=0x2684 numa=0 cur=2.5 GT/s PCIe
+16
+ max=16.0 GT/s PCIe
+16
+=== /proc/bus/pci/devices ===
+0000	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+0001	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+0002	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+0004	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+0008	80860b00	11	    200ffff50004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+0009	80860b00	11	    200ffff4c004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000a	80860b00	11	    200ffff48004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000b	80860b00	11	    200ffff44004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000c	80860b00	11	    200ffff40004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000d	80860b00	11	    200ffff3c004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000e	80860b00	11	    200ffff38004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+000f	80860b00	11	    200ffff34004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+0010	808609a6	0	        98388000	               0	               0	               0	               0	               0	               0	            2000	               0	               0	               0	               0	               0	               0	
+0011	808609a7	0	        98300000	        98280000	               0	               0	               0	               0	               0	           80000	           80000	               0	               0	               0	               0	               0	
+0014	80863456	ff	    200fffe00004	               0	    200ffff30004	               0	    200ffff00004	               0	               0	          100000	               0	            4000	               0	           20000	               0	               0	
+0088	8086a1ec	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+008d	8086a1d2	9c	        98386000	        9838b000	            3071	            3061	            3021	        98180000	               0	            2000	             100	               8	               4	              20	           80000	               0	ahci
+00a0	8086a1af	fd	    200ffff20004	               0	               0	               0	               0	               0	               0	           10000	               0	               0	               0	               0	               0	               0	xhci_hcd
+00a2	8086a1b1	12	    200ffff57004	               0	               0	               0	               0	               0	               0	            1000	               0	               0	               0	               0	               0	               0	intel_pch_thermal
+00b0	8086a1ba	b	    200ffff56004	               0	               0	               0	               0	               0	               0	            1000	               0	               0	               0	               0	               0	               0	
+00b1	8086a1bb	b	    200ffff55004	               0	               0	               0	               0	               0	               0	            1000	               0	               0	               0	               0	               0	               0	
+00b4	8086a1be	b	    200ffff54004	               0	               0	               0	               0	               0	               0	            1000	               0	               0	               0	               0	               0	               0	
+00b8	8086a182	109	        98384000	        9838a000	            3051	            3041	            3001	        98100000	               0	            2000	             100	               8	               4	              20	           80000	               0	ahci
+00e0	8086a190	82	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+00e2	8086a192	83	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+00e3	8086a193	84	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+00f8	8086a1cb	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+00fa	8086a1a1	0	        98380000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	
+00fc	8086a1a3	10	    200000000004	               0	               0	               0	             781	               0	               0	             100	               0	               0	               0	              20	               0	               0	i801_smbus
+00fd	8086a1a4	0	        fe010000	               0	               0	               0	               0	               0	               0	            1000	               0	               0	               0	               0	               0	               0	
+0300	1a031150	10	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+0400	1a032000	10	        94000000	        98000000	            2001	               0	               0	               0	           c0002	         4000000	           20000	              80	               0	               0	               0	           20000	ast
+1600	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+1601	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+1602	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+1604	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+1610	8086347a	85	    201ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+1700	1000c010	10	        9e000000	               0	               0	               0	               0	               0	               0	         1000000	               0	               0	               0	               0	               0	               0	pcieport
+1800	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1820	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1840	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1860	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+18e0	1000c010	10	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1900	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1a00	1000c010	86	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1a80	1000c010	87	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1b00	10de2684	239	        a1000000	    201fa000000c	               0	    201fb000000c	               0	            7001	        a2000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+1b01	10de22ba	11	        a2080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+1c00	10de2684	23a	        9f000000	    201f8000000c	               0	    201f9000000c	               0	            6001	        a0000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+1c01	10de22ba	11	        a0080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+1d00	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1e00	1000c010	88	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1e80	1000c010	89	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+1f00	10de2684	23b	        a3000000	    201fe000000c	               0	    201ff000000c	               0	            5001	        a4000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+1f01	10de22ba	11	        a4080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+2000	1000005d	10	            4001	        a4400004	               0	        a4300004	               0	               0	        a4200000	             100	           10000	               0	          100000	               0	               0	          100000	megaraid_sas
+2100	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+2280	1000c010	8a	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+2300	10de2684	23c	        a5000000	    201fc000000c	               0	    201fd000000c	               0	            8001	        a6000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+2301	10de22ba	11	        a6080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+2400	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+25a0	1000c010	8b	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+25a8	1000c010	8c	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+2800	1000c010	0	        a6200000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	
+3000	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+3001	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+3002	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+3004	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+3010	8086347a	8d	    202ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+3100	1000c010	10	        a8000000	               0	               0	               0	               0	               0	               0	         1000000	               0	               0	               0	               0	               0	               0	pcieport
+3200	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3220	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3240	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3260	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+32e0	1000c010	10	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3300	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3400	1000c010	8e	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3480	1000c010	8f	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3500	10de2684	23d	        ab000000	    202fa000000c	               0	    202fb000000c	               0	            a001	        ac000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+3501	10de22ba	11	        ac080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+3600	10de2684	23e	        a9000000	    202f8000000c	               0	    202f9000000c	               0	            9001	        aa000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+3601	10de22ba	11	        aa080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+3700	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3800	1000c010	90	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3880	1000c010	91	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3900	10de2684	23f	        af000000	    202fe000000c	               0	    202ff000000c	               0	            c001	        b0000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+3901	10de22ba	11	        b0080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+3b00	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3c80	1000c010	92	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3d00	10de2684	240	        ad000000	    202fc000000c	               0	    202fd000000c	               0	            b001	        ae000000	         1000000	        10000000	               0	         2000000	               0	              80	           80000	nvidia
+3d01	10de22ba	11	        ae080000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	snd_hda_intel
+3e00	1000c010	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3fa0	1000c010	93	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+3fa8	1000c010	94	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	pcieport
+4200	1000c010	0	        b0200000	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	
+4a00	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+4a01	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+4a02	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+4a04	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+4a10	8086347a	95	    203ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+6400	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+6401	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+6402	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+6404	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+6410	8086347a	96	    204ffff60004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+6418	8086347b	97	    204ffff40004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+6420	8086347c	98	    204ffff20004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+6428	8086347d	99	    204ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+6600	1e3b1098	11	        c5e10004	               0	               0	               0	               0	               0	        c5e00000	            4000	               0	               0	               0	               0	               0	           10000	nvme
+6700	1e3b1098	12	        c5d10004	               0	               0	               0	               0	               0	        c5d00000	            4000	               0	               0	               0	               0	               0	           10000	nvme
+7e00	80863450	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e01	80863451	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	isst_if_pci
+7e02	80863452	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e03	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e05	80863455	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e10	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e11	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e12	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e18	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e19	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e1a	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e20	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e21	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e22	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e23	80863443	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e28	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e29	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e2a	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e30	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e31	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e32	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e38	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e39	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e3a	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e58	80863448	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e59	80863448	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e5a	8086344b	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7e60	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e68	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e70	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7e78	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+7ed0	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ed8	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ee0	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ee8	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f00	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f01	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f02	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f03	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f04	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f05	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f06	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f07	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f08	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f09	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0a	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0b	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0c	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0d	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0e	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f0f	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f10	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f11	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f12	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f13	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f14	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f15	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f16	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f17	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f18	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f19	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1a	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1b	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1c	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1d	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1e	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f1f	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f20	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f21	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f22	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f23	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f24	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f25	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f26	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f27	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f50	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f51	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f52	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f53	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f54	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f55	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f56	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f57	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f58	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f59	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5a	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5b	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5c	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5d	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5e	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f5f	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f60	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f61	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f62	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f63	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f64	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f65	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f66	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f67	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f68	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f69	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6a	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6b	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6c	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6d	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6e	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f6f	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f70	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f71	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f72	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f73	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f74	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f75	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f76	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7f77	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7fe8	8086344f	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7fe9	80863457	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff0	80863458	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff1	80863459	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	isst_if_mbox_pci
+7ff2	8086345a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff3	8086345b	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff4	8086345c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff5	8086345d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff6	8086345e	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+7ff7	8086345f	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+8000	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+8001	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+8002	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+8004	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+8008	80860b00	10	    205ffff40004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+8009	80860b00	10	    205ffff3c004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800a	80860b00	10	    205ffff38004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800b	80860b00	10	    205ffff34004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800c	80860b00	10	    205ffff30004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800d	80860b00	10	    205ffff2c004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800e	80860b00	10	    205ffff28004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+800f	80860b00	10	    205ffff24004	               0	               0	               0	               0	               0	               0	            4000	               0	               0	               0	               0	               0	               0	ioatdma
+8010	808609a6	0	        d0f80000	               0	               0	               0	               0	               0	               0	            2000	               0	               0	               0	               0	               0	               0	
+8011	808609a7	0	        d0f00000	        d0e80000	               0	               0	               0	               0	               0	           80000	           80000	               0	               0	               0	               0	               0	
+8014	80863456	b	    205fffe00004	               0	    205ffff20004	               0	    205ffff00004	               0	               0	          100000	               0	            4000	               0	           20000	               0	               0	
+9700	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+9701	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+9702	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+9704	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+9710	8086347a	9a	    206ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+9800	15b31015	10	    206ffc00000c	               0	               0	               0	               0	               0	        dba00000	         2000000	               0	               0	               0	               0	               0	          100000	mlx5_core
+9801	15b31015	11	    206ffa00000c	               0	               0	               0	               0	               0	        db900000	         2000000	               0	               0	               0	               0	               0	          100000	mlx5_core
+b000	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+b001	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+b002	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+b004	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+c900	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+c901	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+c902	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+c904	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+c910	8086347a	9b	    208ffff00004	               0	               0	               0	               0	               0	               0	           20000	               0	               0	               0	               0	               0	               0	pcieport
+ca00	80861521	10	        ef800000	               0	            f061	        f100c000	               0	               0	        f0c00000	          800000	               0	              20	            4000	               0	               0	          400000	igb
+ca01	80861521	11	        ef000000	               0	            f041	        f1008000	               0	               0	        f0800000	          800000	               0	              20	            4000	               0	               0	          400000	igb
+ca02	80861521	12	        ee800000	               0	            f021	        f1004000	               0	               0	        f0400000	          800000	               0	              20	            4000	               0	               0	          400000	igb
+ca03	80861521	13	        ee000000	               0	            f001	        f1000000	               0	               0	        f0000000	          800000	               0	              20	            4000	               0	               0	          400000	igb
+e200	808609a2	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+e201	808609a4	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+e202	808609a3	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+e204	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe00	80863450	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe01	80863451	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	isst_if_pci
+fe02	80863452	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe03	80860998	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe05	80863455	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe10	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe11	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe12	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe18	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe19	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe1a	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe20	80863440	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe21	80863441	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe22	80863442	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe23	80863443	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe28	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe29	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe2a	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe30	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe31	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe32	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe38	80863445	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe39	80863446	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe3a	80863447	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe58	80863448	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe59	80863448	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe5a	8086344b	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fe60	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe68	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe70	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fe78	8086344a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	icx_uncore
+fed0	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fed8	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fee0	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fee8	80862880	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff00	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff01	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff02	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff03	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff04	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff05	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff06	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff07	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff08	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff09	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0a	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0b	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0c	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0d	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0e	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff0f	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff10	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff11	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff12	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff13	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff14	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff15	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff16	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff17	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff18	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff19	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1a	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1b	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1c	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1d	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1e	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff1f	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff20	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff21	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff22	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff23	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff24	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff25	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff26	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff27	8086344c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff50	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff51	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff52	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff53	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff54	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff55	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff56	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff57	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff58	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff59	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5a	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5b	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5c	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5d	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5e	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff5f	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff60	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff61	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff62	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff63	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff64	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff65	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff66	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff67	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff68	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff69	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6a	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6b	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6c	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6d	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6e	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff6f	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff70	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff71	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff72	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff73	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff74	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff75	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff76	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ff77	8086344d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ffe8	8086344f	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+ffe9	80863457	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff0	80863458	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff1	80863459	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	isst_if_mbox_pci
+fff2	8086345a	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff3	8086345b	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff4	8086345c	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff5	8086345d	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff6	8086345e	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+fff7	8086345f	0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	               0	
+=== driver modules ===
+NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.95.05  Release Build  (dvs-builder@U22-I3-B17-02-5)  Tue Sep 23 09:55:41 UTC 2025
+GCC version:  gcc version 11.4.0 (Ubuntu 11.4.0-1ubuntu1~22.04) 
+Model: 		 NVIDIA GeForce RTX 4090
+IRQ:   		 572
+GPU UUID: 	 GPU-17f54e78-ccb5-74a2-35c1-806d9ba8928a
+Video BIOS: 	 95.02.3c.00.02
+Bus Type: 	 PCIe
+DMA Size: 	 47 bits
+DMA Mask: 	 0x7fffffffffff
+Bus Location: 	 0000:23:00.0
+Device Minor: 	 3
+GPU Firmware: 	 580.95.05
+GPU Excluded:	 No
+Model: 		 NVIDIA GeForce RTX 4090
+IRQ:   		 573
+GPU UUID: 	 GPU-28d6c0d7-bfc5-07cb-c146-be4ea6836f18
+Video BIOS: 	 95.02.3c.00.02
+Bus Type: 	 PCIe
+DMA Size: 	 47 bits
+DMA Mask: 	 0x7fffffffffff
+Bus Location: 	 0000:35:00.0
+Device Minor: 	 4
+GPU Firmware: 	 580.95.05
+GPU Excluded:	 No
+Model: 		 NVIDIA GeForce RTX 4090
+IRQ:   		 574
+GPU UUID: 	 GPU-98b1e63f-c1f1-fab3-d70c-2c4726df2a3c
+Video BIOS: 	 95.02.3c.00.02
+Bus Type: 	 PCIe
+DMA Size: 	 47 bits
+DMA Mask: 	 0x7fffffffffff
+Bus Location: 	 0000:36:00.0
+Device Minor: 	 5
+GPU Firmware: 	 580.95.05
+GPU Excluded:	 No
+Model: 		 NVIDIA GeForce RTX 4090
+IRQ:   		 575
+GPU UUID: 	 GPU-f774d16e-b6a6-ea61-0870-617b7b40a636
+Video BIOS: 	 95.02.3c.00.02
+Bus Type: 	 PCIe
+DMA Size: 	 47 bits
+DMA Mask: 	 0x7fffffffffff
+Bus Location: 	 0000:39:00.0
+Device Minor: 	 6
+GPU Firmware: 	 580.95.05
+GPU Excluded:	 No
+=== PyTorch CUDA/NCCL and peer API ===
+torch 2.8.0+cu128
+torch.version.cuda 12.8
+cudnn 91002
+nccl (2, 27, 3)
+cuda_available True count 4
+0 NVIDIA GeForce RTX 4090 uuid 17f54e78-ccb5-74a2-35c1-806d9ba8928a pci_bus_id 35 mem 25250627584
+1 NVIDIA GeForce RTX 4090 uuid 28d6c0d7-bfc5-07cb-c146-be4ea6836f18 pci_bus_id 53 mem 25250627584
+2 NVIDIA GeForce RTX 4090 uuid 98b1e63f-c1f1-fab3-d70c-2c4726df2a3c pci_bus_id 54 mem 25250627584
+3 NVIDIA GeForce RTX 4090 uuid f774d16e-b6a6-ea61-0870-617b7b40a636 pci_bus_id 57 mem 25250627584
+can_device_access_peer
+[[None, False, False, False], [False, None, False, False], [False, False, None, False], [False, False, False, None]]
+=== NCCL 4-rank smoke (16 MiB/rank, 10 timed iterations) ===
+command: NCCL_DEBUG=INFO torchrun --standalone --nproc_per_node=4 <temp-smoke.py>
+W0923 00:15:49.944000 6300 site-packages/torch/distributed/run.py:774] 
+W0923 00:15:49.944000 6300 site-packages/torch/distributed/run.py:774] *****************************************
+W0923 00:15:49.944000 6300 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0923 00:15:49.944000 6300 site-packages/torch/distributed/run.py:774] *****************************************
+  File "/root/autodl-tmp/nccl-topology-smoke.32Fbwh.py", line 26
+    if name=="all_reduce": bus=alters:2*(world-1)/world
+                                     ^
+SyntaxError: invalid syntax
+  File "/root/autodl-tmp/nccl-topology-smoke.32Fbwh.py", line 26
+    if name=="all_reduce": bus=alters:2*(world-1)/world
+                                     ^
+SyntaxError: invalid syntax
+  File "/root/autodl-tmp/nccl-topology-smoke.32Fbwh.py", line 26
+    if name=="all_reduce": bus=alters:2*(world-1)/world
+                                     ^
+SyntaxError: invalid syntax
+  File "/root/autodl-tmp/nccl-topology-smoke.32Fbwh.py", line 26
+    if name=="all_reduce": bus=alters:2*(world-1)/world
+                                     ^
+SyntaxError: invalid syntax
+E0923 00:15:50.386000 6300 site-packages/torch/distributed/elastic/multiprocessing/api.py:874] failed (exitcode: 1) local_rank: 0 (pid: 6375) of binary: /root/miniconda3/bin/python
+Traceback (most recent call last):
+  File "/root/miniconda3/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 357, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/distributed/run.py", line 901, in main
+    run(args)
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/distributed/run.py", line 892, in run
+    elastic_launch(
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 143, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 277, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+/root/autodl-tmp/nccl-topology-smoke.32Fbwh.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-09-23_00:15:50
+  host      : localhost
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 6376)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2026-09-23_00:15:50
+  host      : localhost
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 6377)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[3]:
+  time      : 2026-09-23_00:15:50
+  host      : localhost
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 6378)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-23_00:15:50
+  host      : localhost
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 6375)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+=== NCCL 4-rank smoke retry (16 MiB/rank, 10 timed iterations) ===
+W0923 00:16:34.691000 6602 site-packages/torch/distributed/run.py:774] 
+W0923 00:16:34.691000 6602 site-packages/torch/distributed/run.py:774] *****************************************
+W0923 00:16:34.691000 6602 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0923 00:16:34.691000 6602 site-packages/torch/distributed/run.py:774] *****************************************
+autodl-container-9b0546a9a5-84b0e924:6687:6687 [0] NCCL INFO cudaDriverVersion 13000
+autodl-container-9b0546a9a5-84b0e924:6687:6687 [0] NCCL INFO NCCL version 2.27.3+cuda12.9
+autodl-container-9b0546a9a5-84b0e924:6688:6688 [1] NCCL INFO cudaDriverVersion 13000
+autodl-container-9b0546a9a5-84b0e924:6688:6688 [1] NCCL INFO NCCL version 2.27.3+cuda12.9
+autodl-container-9b0546a9a5-84b0e924:6690:6690 [3] NCCL INFO cudaDriverVersion 13000
+autodl-container-9b0546a9a5-84b0e924:6689:6689 [2] NCCL INFO cudaDriverVersion 13000
+autodl-container-9b0546a9a5-84b0e924:6690:6690 [3] NCCL INFO NCCL version 2.27.3+cuda12.9
+autodl-container-9b0546a9a5-84b0e924:6689:6689 [2] NCCL INFO NCCL version 2.27.3+cuda12.9
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so. 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO NET/Plugin: Could not find: libnccl-net.so. 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO NET/IB : No device found.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO NET/IB : Using [RO]; OOB eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Initialized NET plugin Socket
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Assigned NET plugin Socket to comm
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Using network Socket
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO NET/IB : No device found.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO NET/IB : Using [RO]; OOB eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Initialized NET plugin Socket
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Assigned NET plugin Socket to comm
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Using network Socket
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO ncclCommInitRankConfig comm 0x90edfd0 rank 0 nranks 4 cudaDev 0 nvmlDev 0 busId 23000 commId 0x501e53c722f672b8 - Init START
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO ncclCommInitRankConfig comm 0x94c4f90 rank 1 nranks 4 cudaDev 1 nvmlDev 1 busId 35000 commId 0x501e53c722f672b8 - Init START
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO NET/Plugin: Could not find: libnccl-net.so. 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO NET/IB : No device found.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO NET/IB : Using [RO]; OOB eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Initialized NET plugin Socket
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Assigned NET plugin Socket to comm
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Using network Socket
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO ncclCommInitRankConfig comm 0xa6e7d50 rank 3 nranks 4 cudaDev 3 nvmlDev 3 busId 39000 commId 0x501e53c722f672b8 - Init START
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO NET/Plugin: Could not find: libnccl-net.so. 
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO NET/IB : No device found.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO NET/IB : Using [RO]; OOB eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO NET/Socket : Using [0]eth0:172.17.0.7<0>
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Initialized NET plugin Socket
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Assigned NET plugin Socket to comm
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Using network Socket
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO ncclCommInitRankConfig comm 0x9cdabc0 rank 2 nranks 4 cudaDev 2 nvmlDev 2 busId 36000 commId 0x501e53c722f672b8 - Init START
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO TOPO/NET : Importing network plugins to topology
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO TOPO/NET : Importing network plugins to topology
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Retrieving state for Socket
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Retrieving state for Socket
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Initialized state 0 for Socket
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Initialized state 0 for Socket
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO ncclTopoPopulateNics : Filled eth0 in topo with pciPath=(null) keep=1 coll=(null)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO ncclTopoPopulateNics : Filled eth0 in topo with pciPath=(null) keep=1 coll=(null)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO TOPO/NET : Importing network plugins to topology
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Retrieving state for Socket
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Initialized state 0 for Socket
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO ncclTopoPopulateNics : Filled eth0 in topo with pciPath=(null) keep=1 coll=(null)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO TOPO/NET : Importing network plugins to topology
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Retrieving state for Socket
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Initialized state 0 for Socket
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO ncclTopoPopulateNics : Filled eth0 in topo with pciPath=(null) keep=1 coll=(null)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO === System : maxBw 24.0 totalBw 24.0 ===
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO CPU/0-0 (1/1/2)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO + PCI[5000.0] - NIC/0-0
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO + PCI[24.0] - PCI/0-17000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO               + PCI[24.0] - GPU/0-23000 (0)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO + PCI[24.0] - PCI/0-31000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO               + PCI[24.0] - GPU/0-35000 (1)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO               + PCI[24.0] - GPU/0-36000 (2)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO               + PCI[24.0] - GPU/0-39000 (3)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO ==========================================
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO GPU/0-23000 :GPU/0-23000 (0/5000.0/LOC) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO GPU/0-35000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (0/5000.0/LOC) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO GPU/0-36000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (0/5000.0/LOC) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO GPU/0-39000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (0/5000.0/LOC) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Setting affinity for GPU 2 to 0-31,64-95
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO NVLS multicast support is not available on dev 2 (NVLS_NCHANNELS 0)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO === System : maxBw 24.0 totalBw 24.0 ===
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO CPU/0-0 (1/1/2)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO + PCI[5000.0] - NIC/0-0
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO + PCI[24.0] - PCI/0-17000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO               + PCI[24.0] - GPU/0-23000 (0)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO + PCI[24.0] - PCI/0-31000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO               + PCI[24.0] - GPU/0-35000 (1)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO               + PCI[24.0] - GPU/0-36000 (2)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO               + PCI[24.0] - GPU/0-39000 (3)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO ==========================================
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO GPU/0-23000 :GPU/0-23000 (0/5000.0/LOC) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO GPU/0-35000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (0/5000.0/LOC) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO GPU/0-36000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (0/5000.0/LOC) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO GPU/0-39000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (0/5000.0/LOC) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Setting affinity for GPU 3 to 0-31,64-95
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO === System : maxBw 24.0 totalBw 24.0 ===
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO CPU/0-0 (1/1/2)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO + PCI[5000.0] - NIC/0-0
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO + PCI[24.0] - PCI/0-17000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO               + PCI[24.0] - GPU/0-23000 (0)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO + PCI[24.0] - PCI/0-31000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO               + PCI[24.0] - GPU/0-35000 (1)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO               + PCI[24.0] - GPU/0-36000 (2)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO               + PCI[24.0] - GPU/0-39000 (3)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO ==========================================
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO GPU/0-23000 :GPU/0-23000 (0/5000.0/LOC) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO GPU/0-35000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (0/5000.0/LOC) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO GPU/0-36000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (0/5000.0/LOC) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO GPU/0-39000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (0/5000.0/LOC) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Setting affinity for GPU 1 to 0-31,64-95
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 2 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 3 and 1. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 1 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 3 and 2. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 1 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P is disabled between connected GPUs 2 and 3. You can repress this message with NCCL_IGNORE_DISABLED_P2P=1.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO === System : maxBw 24.0 totalBw 24.0 ===
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO CPU/0-0 (1/1/2)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO + PCI[5000.0] - NIC/0-0
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO + PCI[24.0] - PCI/0-17000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO               + PCI[24.0] - GPU/0-23000 (0)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO + PCI[24.0] - PCI/0-31000 (1000c0101000ffff)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO               + PCI[24.0] - GPU/0-35000 (1)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO               + PCI[24.0] - GPU/0-36000 (2)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO               + PCI[24.0] - GPU/0-39000 (3)
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO ==========================================
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO GPU/0-23000 :GPU/0-23000 (0/5000.0/LOC) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO GPU/0-35000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (0/5000.0/LOC) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO GPU/0-36000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (0/5000.0/LOC) GPU/0-39000 (4/24.0/PHB) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO GPU/0-39000 :GPU/0-23000 (4/24.0/PHB) GPU/0-35000 (4/24.0/PHB) GPU/0-36000 (4/24.0/PHB) GPU/0-39000 (0/5000.0/LOC) CPU/0-0 (2/24.0/PHB) 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Setting affinity for GPU 0 to 0-31,64-95
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO NVLS multicast support is not available on dev 1 (NVLS_NCHANNELS 0)
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 6.000000/6.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO  0 : GPU/0 GPU/1 GPU/2 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Pattern 1, crossNic 0, nChannels 1, bw 10.000000/10.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO  0 : GPU/1 GPU/2 GPU/0 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO NVLS multicast support is not available on dev 0 (NVLS_NCHANNELS 0)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO NVLS multicast support is not available on dev 3 (NVLS_NCHANNELS 0)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 6.000000/6.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO  0 : GPU/0 GPU/1 GPU/2 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Pattern 1, crossNic 0, nChannels 1, bw 10.000000/10.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO  0 : GPU/1 GPU/2 GPU/0 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 6.000000/6.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO  0 : GPU/0 GPU/1 GPU/2 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Pattern 1, crossNic 0, nChannels 1, bw 10.000000/10.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO  0 : GPU/1 GPU/2 GPU/0 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Pattern 4, crossNic 0, nChannels 1, bw 6.000000/6.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO  0 : GPU/0 GPU/1 GPU/2 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Pattern 1, crossNic 0, nChannels 1, bw 10.000000/10.000000, type PHB/PIX, sameChannels 1
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO  0 : GPU/1 GPU/2 GPU/0 GPU/3
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO comm 0x9cdabc0 rank 2 nRanks 4 nNodes 1 localRanks 4 localRank 2 MNNVL 0
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO comm 0x90edfd0 rank 0 nRanks 4 nNodes 1 localRanks 4 localRank 0 MNNVL 0
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO comm 0x94c4f90 rank 1 nRanks 4 nNodes 1 localRanks 4 localRank 1 MNNVL 0
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO comm 0xa6e7d50 rank 3 nRanks 4 nNodes 1 localRanks 4 localRank 3 MNNVL 0
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Tree 0 : 1 -> 2 -> 0/-1/-1
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Tree 1 : 1 -> 2 -> 0/-1/-1
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Tree 0 : -1 -> 1 -> 2/-1/-1
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Channel 00/02 : 0 1 2 3
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Tree 1 : -1 -> 1 -> 2/-1/-1
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Ring 00 : 1 -> 2 -> 3
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Channel 01/02 : 0 1 2 3
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Ring 00 : 2 -> 3 -> 0
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Ring 01 : 1 -> 2 -> 3
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Trees [0] 0/-1/-1->2->1 [1] 0/-1/-1->2->1
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Ring 01 : 2 -> 3 -> 0
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Ring 00 : 3 -> 0 -> 1
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Ring 00 : 0 -> 1 -> 2
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO P2P Chunksize set to 131072
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Trees [0] -1/-1/-1->3->0 [1] -1/-1/-1->3->0
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Ring 01 : 3 -> 0 -> 1
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Ring 01 : 0 -> 1 -> 2
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO P2P Chunksize set to 131072
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Trees [0] 3/-1/-1->0->2 [1] 3/-1/-1->0->2
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Trees [0] 2/-1/-1->1->-1 [1] 2/-1/-1->1->-1
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO P2P Chunksize set to 131072
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO P2P Chunksize set to 131072
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so. 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so. 
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so. 
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so. 
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Check P2P Type isAllDirectP2p 0 directMode 0
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO [Proxy Service] Device 3 CPU core 80
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO [Proxy Service] Device 1 CPU core 70
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO [Proxy Service] Device 0 CPU core 86
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO [Proxy Service] Device 2 CPU core 3
+autodl-container-9b0546a9a5-84b0e924:6690:6731 [3] NCCL INFO [Proxy Service UDS] Device 3 CPU core 81
+autodl-container-9b0546a9a5-84b0e924:6688:6729 [1] NCCL INFO [Proxy Service UDS] Device 1 CPU core 8
+autodl-container-9b0546a9a5-84b0e924:6687:6730 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 87
+autodl-container-9b0546a9a5-84b0e924:6689:6728 [2] NCCL INFO [Proxy Service UDS] Device 2 CPU core 7
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO threadThresholds 8/8/64 | 32/8/64 | 512 | 512
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO 2 coll channels, 2 collnet channels, 0 nvls channels, 2 p2p channels, 2 p2p channels per peer
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO CC Off, workFifoBytes 1048576
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so. Using internal tuner plugin.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so. Using internal tuner plugin.
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO ncclCommInitRankConfig comm 0x9cdabc0 rank 2 nranks 4 cudaDev 2 nvmlDev 2 busId 36000 commId 0x501e53c722f672b8 - Init COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so. Using internal tuner plugin.
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so. Using internal tuner plugin.
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO ncclCommInitRankConfig comm 0x90edfd0 rank 0 nranks 4 cudaDev 0 nvmlDev 0 busId 23000 commId 0x501e53c722f672b8 - Init COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6689:6719 [2] NCCL INFO Init timings - ncclCommInitRankConfig: rank 2 nranks 4 total 0.24 (kernels 0.16, alloc 0.00, bootstrap 0.04, allgathers 0.01, topo 0.02, graphs 0.01, connections 0.01, rest 0.00)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO ncclCommInitRankConfig comm 0xa6e7d50 rank 3 nranks 4 cudaDev 3 nvmlDev 3 busId 39000 commId 0x501e53c722f672b8 - Init COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO ncclCommInitRankConfig comm 0x94c4f90 rank 1 nranks 4 cudaDev 1 nvmlDev 1 busId 35000 commId 0x501e53c722f672b8 - Init COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6687:6716 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 4 total 0.25 (kernels 0.16, alloc 0.00, bootstrap 0.05, allgathers 0.00, topo 0.02, graphs 0.01, connections 0.01, rest 0.01)
+autodl-container-9b0546a9a5-84b0e924:6690:6718 [3] NCCL INFO Init timings - ncclCommInitRankConfig: rank 3 nranks 4 total 0.24 (kernels 0.16, alloc 0.00, bootstrap 0.04, allgathers 0.00, topo 0.02, graphs 0.01, connections 0.01, rest 0.01)
+autodl-container-9b0546a9a5-84b0e924:6688:6717 [1] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 4 total 0.25 (kernels 0.15, alloc 0.00, bootstrap 0.05, allgathers 0.00, topo 0.02, graphs 0.01, connections 0.01, rest 0.01)
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc662800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3da800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb4a4800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc663200000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb4a5200000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3db200000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9838800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc663c00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb4a5c00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3dbc00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO Channel 00 : 3[3] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO Channel 00 : 2[2] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO Channel 00 : 1[1] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9839200000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb4a5e00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3dbe00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO Channel 01 : 2[2] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO Channel 01 : 1[1] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc663e00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9839c00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO Channel 01 : 3[3] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO Channel 00 : 0[0] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9839e00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO Channel 01 : 0[0] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7fb4a6000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7ff3dc000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fc664000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7f983a000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fb4a6a00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7ff3dca00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7fc664a00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7f983aa00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7ff3dcc00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7fb4a6c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7f983ac00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fc664c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7ff3dd600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fb4a7600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7f983b600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7fc665600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6732 [1] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+autodl-container-9b0546a9a5-84b0e924:6687:6735 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+autodl-container-9b0546a9a5-84b0e924:6690:6733 [3] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+autodl-container-9b0546a9a5-84b0e924:6689:6734 [2] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+/root/miniconda3/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/root/miniconda3/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/root/miniconda3/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+/root/miniconda3/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py:4807: UserWarning: No device id is provided via `init_process_group` or `barrier `. Using the current device set by the user. 
+  warnings.warn(  # warn only once
+all_reduce: median_max_rank_3.955_ms payload_16.0_MiB algGBps_4.242 busGBps_6.364
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980c000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47c000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc638000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980ca00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47ca00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc638a00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b0000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f97f3e00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 00 : 0[0] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc61fe00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb45be00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 00 : 3[3] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 00 : 2[2] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b0a00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980d400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 01 : 0[0] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc639400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47d400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 01 : 3[3] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 01 : 2[2] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff397e00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 00 : 1[1] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b1400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 01 : 1[1] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc639600000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980d600000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63a000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b1600000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47d600000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63aa00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 00 : 3[3] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980e000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47e000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b2000000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980ea00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63ac00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 00 : 0[0] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 01 : 3[3] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b2a00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47ea00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 00 : 1[1] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 00 : 2[2] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980ec00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47ec00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 01 : 0[0] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b2c00000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 01 : 2[2] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 01 : 1[1] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980ee00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63ae00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47ee00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b2e00000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f980f800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63b800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb47f800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b3800000 size 9637888
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9810200000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 00 : 0[0] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b4200000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63c200000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 00 : 1[1] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb480200000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 00 : 3[3] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 00 : 2[2] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6726 [0] NCCL INFO CUMEM allocated shareable buffer 0x7f9810400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO Channel 01 : 0[0] -> 3[3] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6689:6724 [2] NCCL INFO CUMEM allocated shareable buffer 0x7fb480400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6727 [3] NCCL INFO CUMEM allocated shareable buffer 0x7fc63c400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO Channel 01 : 2[2] -> 1[1] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6725 [1] NCCL INFO CUMEM allocated shareable buffer 0x7ff3b4400000 size 4096
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO Channel 01 : 3[3] -> 2[2] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO Channel 01 : 1[1] -> 0[0] via SHM/direct/direct
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7f9810600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7ff3b4600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fc63c600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7fb480600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7ff3b5000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fb481000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7f9811000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7fc63d000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7f9811200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7fb481200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7ff3b5200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fc63d200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7f9811c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7ff3b5c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fb481c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7fc63dc00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7f9811e00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7ff3b5e00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fb481e00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7f9812800000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7ff3b6800000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7fc63de00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7f9812a00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7fb482800000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7ff3b6a00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fc63e800000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7f9813400000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7fb482a00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7fc63ea00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7ff3b7400000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7fb483400000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7f9813600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7fc63f400000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7ff3b7600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7fb483600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7fc63f600000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7f9814000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7ff3b8000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7fb484000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 9637888 ptr 0x7f9814200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7fc640000000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 9637888 ptr 0x7fb484200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 9637888 ptr 0x7ff3b8200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6687:6739 [0] NCCL INFO CUMEM imported shareable host buffer from proxyRank 1 size 4096 ptr 0x7f9814c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 9637888 ptr 0x7fc640200000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6689:6737 [2] NCCL INFO CUMEM imported shareable host buffer from proxyRank 3 size 4096 ptr 0x7fb484c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6688:6738 [1] NCCL INFO CUMEM imported shareable host buffer from proxyRank 2 size 4096 ptr 0x7ff3b8c00000, granularity 2097152
+autodl-container-9b0546a9a5-84b0e924:6690:6736 [3] NCCL INFO CUMEM imported shareable host buffer from proxyRank 0 size 4096 ptr 0x7fc640c00000, granularity 2097152
+all_to_all_single: median_max_rank_2.187_ms payload_16.0_MiB algGBps_7.670 busGBps_7.670
+all_to_all_correct True
+autodl-container-9b0546a9a5-84b0e924:6688:6688 [1] NCCL INFO comm 0x94c4f90 rank 1 nranks 4 cudaDev 1 busId 35000 - Destroy COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6687:6687 [0] NCCL INFO comm 0x90edfd0 rank 0 nranks 4 cudaDev 0 busId 23000 - Destroy COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6690:6690 [3] NCCL INFO comm 0xa6e7d50 rank 3 nranks 4 cudaDev 3 busId 39000 - Destroy COMPLETE
+autodl-container-9b0546a9a5-84b0e924:6689:6689 [2] NCCL INFO comm 0x9cdabc0 rank 2 nranks 4 cudaDev 2 busId 36000 - Destroy COMPLETE
+=== sysfs PCI tree substitute (lspci unavailable in base image) ===
+GPU 0000:23:00.0: /sys/devices/pci0000:16/0000:16:02.0/0000:17:00.0/0000:18:08.0/0000:21:00.0/0000:22:10.0/0000:23:00.0
+  0000:16:02.0 class=0x060400 id=0x8086:0x347a numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:17:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:18:08.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:21:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:22:10.0 class=0x060400 id=0x1000:0xc010 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:23:00.0 class=0x030000 id=0x10de:0x2684 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+GPU 0000:35:00.0: /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:00.0/0000:33:00.0/0000:34:00.0/0000:35:00.0
+  0000:30:02.0 class=0x060400 id=0x8086:0x347a numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:31:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:32:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:33:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:34:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:35:00.0 class=0x030000 id=0x10de:0x2684 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+GPU 0000:36:00.0: /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:00.0/0000:33:00.0/0000:34:10.0/0000:36:00.0
+  0000:30:02.0 class=0x060400 id=0x8086:0x347a numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:31:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:32:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:33:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:34:10.0 class=0x060400 id=0x1000:0xc010 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:36:00.0 class=0x030000 id=0x10de:0x2684 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+GPU 0000:39:00.0: /sys/devices/pci0000:30/0000:30:02.0/0000:31:00.0/0000:32:04.0/0000:37:00.0/0000:38:00.0/0000:39:00.0
+  0000:30:02.0 class=0x060400 id=0x8086:0x347a numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:31:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:32:04.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:37:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=16.0 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:38:00.0 class=0x060400 id=0x1000:0xc010 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+  0000:39:00.0 class=0x030000 id=0x10de:0x2684 numa=0 current=2.5 GT/s PCIex16 max=16.0 GT/s PCIex16
+=== NUMA sysfs distances and memory ===
+node0 cpulist=0-31,64-95 distance=10 20 memtotal=527995672 kB
+node1 cpulist=32-63,96-127 distance=20 10 memtotal=528458812 kB
+=== NCCL 4-rank bandwidth smoke (64 MiB/rank, 10 timed iterations) ===
+W0923 00:18:36.278000 7872 site-packages/torch/distributed/run.py:774] 
+W0923 00:18:36.278000 7872 site-packages/torch/distributed/run.py:774] *****************************************
+W0923 00:18:36.278000 7872 site-packages/torch/distributed/run.py:774] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0923 00:18:36.278000 7872 site-packages/torch/distributed/run.py:774] *****************************************
+all_reduce: median_max_rank_15.216_ms payload_64.0_MiB algGBps_4.410 busGBps_6.616
+all_to_all_single: median_max_rank_8.325_ms payload_64.0_MiB algGBps_8.061 busGBps_8.061
+all_to_all_correct True

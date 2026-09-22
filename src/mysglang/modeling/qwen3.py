@@ -426,9 +426,9 @@ class Qwen3Experts(nn.Module):
                 local_experts,
             )
             current = current * routing_weights[token_indices, top_k_slots, None]
-            result = torch.zeros_like(hidden_states)
-            result.index_add_(0, token_indices, current.to(result.dtype))
-            return result
+            # Rows already follow token-major, top-k-slot order.  A fixed-order
+            # reduction avoids conflicting BF16 atomic adds for one token.
+            return current.view(hidden_states.size(0), top_k, -1).sum(dim=1)
 
         owned = (flat_experts >= self.local_expert_start) & (
             flat_experts < self.local_expert_end
@@ -443,9 +443,15 @@ class Qwen3Experts(nn.Module):
         else:
             current = self._grouped_expert_gemm(expert_inputs, local_experts)
         current = current * routing_weights[token_indices, top_k_slots, None]
-        result = torch.zeros_like(hidden_states)
-        result.index_add_(0, token_indices, current.to(result.dtype))
-        return result
+        # Each assignment owns one unique (token, top-k slot).  Scatter into those
+        # unique rows first, then reduce slots in a deterministic order.  Direct
+        # index_add_ would issue conflicting atomics for every token and can change
+        # near-tied greedy logits between otherwise identical BF16 runs.
+        assignment_output = hidden_states.new_zeros(
+            (flat_experts.numel(), hidden_states.size(-1))
+        )
+        assignment_output.index_copy_(0, assignment_indices, current)
+        return assignment_output.view(hidden_states.size(0), top_k, -1).sum(dim=1)
 
     @staticmethod
     def _token_shard_sizes(total_tokens: int, world_size: int) -> tuple[int, ...]:

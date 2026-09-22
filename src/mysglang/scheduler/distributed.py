@@ -254,6 +254,10 @@ class TensorParallelScheduler:
             self._scheduler.reset_prefix_cache()
             return None
         if command.name == "shutdown":
+            # Every rank must drop captured NCCL graphs before the caller destroys
+            # the process group. Otherwise graph-owned communicators can keep worker
+            # processes and their GPU allocations alive after benchmark completion.
+            self._scheduler.close()
             return None
         raise ValueError(f"unknown TP scheduler command: {command.name}")
 

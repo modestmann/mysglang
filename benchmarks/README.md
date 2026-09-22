@@ -80,8 +80,15 @@ JSONL 的 scheduler 部分会记录 `speculative_draft_tokens`、
 output tokens/s、ITL、`model_forwards` 及接受率。高重复 synthetic prompt 只表示机制上界，
 正式结论还应包含真实对话和代码 workload。
 
+若 FA2 并发路径不能逐 token 对齐，先用 Torch attention 重跑相同 A/B。Torch
+精确对齐而 FA2 分叉时，还要比较单请求与并发请求的首个不同 token：普通
+Decode 与 packed verification 可能调用不同 BF16 kernel，临界 logits 的归约
+舍入可以改变 greedy `argmax`。这类结果必须在报告中标注为数值分叉，
+不能既当作 KV/调度错误，也不能声称 bitwise 对齐通过。
+
 已有实测报告：
 
+- [最终验收：Dense Graph、MoE Triton/Graph 与 n-gram](results/2026-09-23-final-4090x4/report.md)；
 - [Qwen3-0.6B：RTX 4090 ×4](results/2026-09-21-4090x4/report.md)；
 - [Qwen3-30B-A3B：RTX 4090 ×4 MoE](results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)；
 - [Qwen3-30B-A3B：grouped 与 all-to-all A/B](results/2026-09-22-qwen3-30b-a3b-grouped-a2a-4090x4/report.md)。

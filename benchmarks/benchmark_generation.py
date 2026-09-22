@@ -334,8 +334,8 @@ async def _main(args: argparse.Namespace) -> None:
         print(json.dumps({"output": str(args.output), **result["metrics"]}, indent=2))
     finally:
         try:
-            if runtime.scheduler is not None and runtime.scheduler.is_driver:
-                runtime.scheduler.shutdown()
+            if runtime.service is not None:
+                runtime.service.close()
         finally:
             if runtime.owns_process_group and dist.is_initialized():
                 dist.destroy_process_group()

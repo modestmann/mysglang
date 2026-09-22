@@ -89,6 +89,15 @@ class GenerationService:
     def stats(self) -> SchedulerStats:
         return self.scheduler.stats
 
+    def close(self) -> None:
+        """Release Scheduler resources after all sessions have completed."""
+        if self._worker_task is not None:
+            raise RuntimeError("cannot close GenerationService while its worker is active")
+        if isinstance(self.scheduler, TensorParallelScheduler):
+            self.scheduler.shutdown()
+        else:
+            self.scheduler.close()
+
     def start(
         self,
         prompt: str,

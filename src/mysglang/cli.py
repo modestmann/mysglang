@@ -360,8 +360,8 @@ async def _run(args: argparse.Namespace) -> None:
         await _run_driver(runtime.service, args)
     finally:
         try:
-            if runtime.scheduler is not None and runtime.scheduler.is_driver:
-                runtime.scheduler.shutdown()
+            if runtime.service is not None:
+                runtime.service.close()
         finally:
             if runtime.owns_process_group and dist.is_initialized():
                 dist.destroy_process_group()
