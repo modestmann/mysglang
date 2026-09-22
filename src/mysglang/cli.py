@@ -68,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("auto", "flash", "torch"), default="auto")
     parser.add_argument(
         "--moe-dispatch",
-        choices=("naive", "sorted", "grouped", "all_to_all"),
+        choices=("naive", "sorted", "grouped", "triton_grouped", "all_to_all"),
         default="sorted",
     )
     parser.add_argument("--max-new-tokens", type=int, default=128)

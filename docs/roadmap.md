@@ -52,7 +52,8 @@
 - 已保留 naive/sorted 基线，并增加 padded-batched grouped GEMM 以及 token ownership +
   variable all-to-all dispatch/combine reference；两者已通过单进程 oracle、Gloo TP=2
   forward 与 continuous batching；四卡 CUDA A/B 显示 grouped 慢 2.6%～8.2%，all-to-all
-  又慢 20.5%～30.2%，因此保持 sorted 默认，下一步只评估无 padding Triton fused kernel；
+  又慢 20.5%～30.2%，因此保持 sorted 默认；已加入 offsets 驱动、融合 SwiGLU 的无
+  padding Triton grouped kernel，下一步在四卡完成 token oracle 与同 workload A/B；
 - 保留 `naive` dispatch 基线并默认使用 sorted dispatch：一次筛选本 rank assignments 后
   按 expert 分组；SafeTensors 对 packed experts 和 TP projection 直接读取 rank-local slice。
 

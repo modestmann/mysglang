@@ -153,7 +153,7 @@ class ModelRegressionTest(unittest.TestCase):
             rtol=1e-5,
         )
 
-        for backend in ("grouped", "all_to_all"):
+        for backend in ("grouped", "triton_grouped", "all_to_all"):
             optimized_model = Qwen3ForCausalLM(
                 config,
                 moe_dispatch_backend=backend,
@@ -184,6 +184,12 @@ class ModelRegressionTest(unittest.TestCase):
             )
         torch.testing.assert_close(
             experts._grouped_expert_gemm(expert_inputs, local_experts),
+            expected_expert_outputs,
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        torch.testing.assert_close(
+            experts._triton_grouped_expert_gemm(expert_inputs, local_experts),
             expected_expert_outputs,
             atol=1e-5,
             rtol=1e-5,

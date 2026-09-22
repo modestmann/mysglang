@@ -232,6 +232,15 @@ batched matrices，以两次 `bmm` 替代 Python 逐 expert GEMM loop；这是�
 Triton/fused kernel 可在结果证明值得时替换它。若路由极端倾斜使 padding 超过真实
 assignment 的两倍，该路径会回退到逐活跃 expert GEMM，避免临时 tensor 放大导致 OOM。
 
+`triton_grouped` 先将本 rank 的 assignments 按 local expert 排序，再构造两张长度仅为
+`num_local_experts + 1` 的表：`row_offsets` 表示每个 expert 的真实行区间，
+`tile_offsets` 表示每个 expert 占用的 Triton M tiles。kernel 根据 tile ID 在 offsets 中
+找到 expert，直接读取该 expert 的 gate/up/down 权重；最后一个 tile 只用 mask 处理不足
+`BLOCK_M` 的尾行，不再创建 `[active_experts, max_count, hidden]` padding tensor。第一遍
+kernel 同时完成 gate GEMM、up GEMM 和 SwiGLU，只保留 `[assignments, moe_intermediate]`
+中间结果；第二遍完成 down GEMM。CPU、FP32 和 Gloo 测试走同语义的逐 expert reference，
+实际 Triton kernel 只用于 CUDA FP16/BF16。它在四卡实测前不是默认路径。
+
 `all_to_all` 不建立新的 TP×EP mesh，而是复用相同 rank group：先将 flattened tokens 按
 连续区间指定给 source rank；source 将 top-k assignments 按 `(expert owner, local expert)`
 排序，经第一次 variable all-to-all 发到 expert owner；owner 用 grouped 路径计算，再经

@@ -138,7 +138,7 @@ def _moe_tp_worker(
             legacy_actual = legacy_model(input_ids)
         torch.testing.assert_close(legacy_actual, expected, atol=1e-5, rtol=1e-5)
 
-        for backend in ("grouped", "all_to_all"):
+        for backend in ("grouped", "triton_grouped", "all_to_all"):
             optimized_model = Qwen3ForCausalLM(
                 config,
                 tensor_parallel=parallel,

@@ -192,11 +192,11 @@ class Qwen3MLP(nn.Module):
 class Qwen3Experts(nn.Module):
     """Expert-sharded top-k dispatch with selectable communication and GEMM paths.
 
-    ``naive``, ``sorted`` and ``grouped`` keep token hidden states replicated and combine
-    rank-local expert contributions with all-reduce. ``all_to_all`` first gives each rank a
-    contiguous token shard, dispatches its assignments to expert owners, returns expert
-    outputs to token owners, then all-gathers token outputs because the following Attention
-    TP layer still requires replicated tokens.
+    ``naive``, ``sorted``, ``grouped`` and ``triton_grouped`` keep token hidden states
+    replicated and combine rank-local expert contributions with all-reduce. ``all_to_all``
+    first gives each rank a contiguous token shard, dispatches its assignments to expert
+    owners, returns expert outputs to token owners, then all-gathers token outputs because
+    the following Attention TP layer still requires replicated tokens.
     """
 
     def __init__(
@@ -206,9 +206,11 @@ class Qwen3Experts(nn.Module):
         dispatch_backend: str,
     ) -> None:
         super().__init__()
-        if dispatch_backend not in {"naive", "sorted", "grouped", "all_to_all"}:
+        valid_backends = {"naive", "sorted", "grouped", "triton_grouped", "all_to_all"}
+        if dispatch_backend not in valid_backends:
             raise ValueError(
-                "MoE dispatch backend must be 'naive', 'sorted', 'grouped' or 'all_to_all'"
+                "MoE dispatch backend must be 'naive', 'sorted', 'grouped', "
+                "'triton_grouped' or 'all_to_all'"
             )
         self.num_experts = config.num_experts
         self.expert_parallel = expert_parallel
@@ -262,8 +264,13 @@ class Qwen3Experts(nn.Module):
                 selected_experts,
                 routing_weights,
             )
-        if self.dispatch_backend == "grouped":
-            result = self._forward_grouped(hidden_states, selected_experts, routing_weights)
+        if self.dispatch_backend in {"grouped", "triton_grouped"}:
+            result = self._forward_grouped(
+                hidden_states,
+                selected_experts,
+                routing_weights,
+                use_triton=self.dispatch_backend == "triton_grouped",
+            )
         elif self.dispatch_backend == "sorted":
             result = self._forward_sorted(hidden_states, selected_experts, routing_weights)
         else:
@@ -361,13 +368,48 @@ class Qwen3Experts(nn.Module):
         output[order] = sorted_output
         return output
 
+    def _loop_expert_gemm(
+        self,
+        inputs: torch.Tensor,
+        local_experts: torch.Tensor,
+    ) -> torch.Tensor:
+        """No-padding reference used when the Triton backend is selected off CUDA."""
+        output = torch.empty_like(inputs)
+        for expert_idx in range(self.num_local_experts):
+            indices = torch.where(local_experts == expert_idx)[0]
+            if indices.numel() == 0:
+                continue
+            gate, up = F.linear(inputs[indices], self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
+            output[indices] = F.linear(F.silu(gate) * up, self.down_proj[expert_idx])
+        return output
+
+    def _triton_grouped_expert_gemm(
+        self,
+        inputs: torch.Tensor,
+        local_experts: torch.Tensor,
+    ) -> torch.Tensor:
+        # CPU/Gloo tests validate routing and fallback semantics. The actual kernel is
+        # intentionally imported only on CUDA so Triton remains an optional dependency.
+        if not inputs.is_cuda or inputs.dtype not in {torch.float16, torch.bfloat16}:
+            return self._loop_expert_gemm(inputs, local_experts)
+        from .triton_moe import triton_grouped_mlp
+
+        return triton_grouped_mlp(
+            inputs.contiguous(),
+            local_experts,
+            self.gate_up_proj,
+            self.down_proj,
+        )
+
     def _forward_grouped(
         self,
         hidden_states: torch.Tensor,
         selected_experts: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        use_triton: bool = False,
     ) -> torch.Tensor:
-        """Compute this rank's replicated-token assignments with batched expert GEMMs."""
+        """Compute this rank's replicated-token assignments with grouped expert GEMMs."""
         top_k = selected_experts.size(1)
         flat_experts = selected_experts.reshape(-1)
         owned = (flat_experts >= self.local_expert_start) & (
@@ -377,7 +419,11 @@ class Qwen3Experts(nn.Module):
         token_indices = torch.div(assignment_indices, top_k, rounding_mode="floor")
         top_k_slots = assignment_indices.remainder(top_k)
         local_experts = flat_experts[assignment_indices] - self.local_expert_start
-        current = self._grouped_expert_gemm(hidden_states[token_indices], local_experts)
+        expert_inputs = hidden_states[token_indices]
+        if use_triton:
+            current = self._triton_grouped_expert_gemm(expert_inputs, local_experts)
+        else:
+            current = self._grouped_expert_gemm(expert_inputs, local_experts)
         current = current * routing_weights[token_indices, top_k_slots, None]
         result = torch.zeros_like(hidden_states)
         result.index_add_(0, token_indices, current.to(result.dtype))

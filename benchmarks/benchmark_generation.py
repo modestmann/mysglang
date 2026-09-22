@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("flash", "torch", "auto"), default="flash")
     parser.add_argument(
         "--moe-dispatch",
-        choices=("naive", "sorted", "grouped", "all_to_all"),
+        choices=("naive", "sorted", "grouped", "triton_grouped", "all_to_all"),
         default="sorted",
     )
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
