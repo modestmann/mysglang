@@ -195,6 +195,43 @@ static cache_seqlens / positions / slot_mapping / cu_seqlens
 
 Graph replay 不会再次执行 capture 时的 Python。各层 backend 因此在 Graph 内只写物理 KV，不推进 Python 维护的逻辑长度；输出 token 同步成功后，`commit_batch()` 才一次性提交所有层长度。若 kernel 失败，逻辑长度仍停在旧值。混合 Prefill/Decode 的 token 数和分段形状经常变化，当前继续使用 packed eager 路径，不进入 Decode Graph。
 
+### N-gram 投机解码
+
+这里实现的是无草稿模型路径。对每个 greedy 请求，从 `prompt + generated output`
+的末尾取后缀，在更早历史中查找最长相同后缀，相同长度时选最近的一次。
+该匹配之后已经出现过的 token，就是最多 `speculative_ngram_max_tokens` 个草稿。
+它不增加草稿模型和权重，主要适合代码、模板和重复对话结构。
+
+假设 KV 尚未包含最新输出 `x`，proposer 返回 `[d1, d2, d3]`，主模型一次计算：
+
+```text
+input:   [x,  d1, d2, d3]
+logits:  [t1, t2, t3, t4]
+compare:  t1=d1? t2=d2? t3=d3?
+```
+
+若只接受 `d1`，本轮输出 `[d1, t2]`；若三个草稿全部通过，输出
+`[d1, d2, d3, t4]`，其中 `t4` 是 bonus token。多请求可以有不同草稿长度，
+展平后进入同一个 packed target forward。现有 causal packed attention 保证后面的候选
+不会影响前面的验证 logits，也不需要 padding。
+
+主模型会先写入所有候选的 KV。得到接受长度后，`PagedKVCache.truncate()` 把
+每层逻辑长度改为 `old_length + emitted_tokens`。被拒绝的槽位仍是请求已预留页中
+不可达的字节，下次 append 直接覆盖，无需拷贝或立即释放物理页。EOS/长度边界
+会先截断多 token 结果。TP 中 rank 0 同步每请求的输出数量和展平 token，所有 rank
+因此回滚到同一逻辑位置。
+
+投机只用于纯 Decode step。混合 Prefill/Decode 仍让每个 Decode 请求只前进一个 token；
+投机验证由于形状不定，走 packed eager。若本轮没有任何匹配，仍回到原有
+dense Decode 和可用的 CUDA Graph。随机采样也保持普通路径：n-gram 只提供 token
+猜测，没有草稿概率，因而 greedy 前缀比较是精确的，temperature/top-k/top-p 需要另一套
+拒绝采样算法。
+
+当前 proposer 做有界历史扫描，优先保留教学可读性。[SGLang 的 n-gram 路线](https://github.com/sgl-project/sglang/issues/21052)使用
+per-session trie，并可以生成 token tree 让主模型一次验证；这会提高查找和候选广度，
+但也需要 tree attention metadata 和淘汰策略。所查看的 mini-SGLang 教学版本没有投机路径。
+本实现与 SGLang 共享“会话历史草稿 + 主模型验证”边界，但先只实现一条线性候选链。
+
 ## 5. 真实 Qwen3、MoE 与 tokenizer
 
 `Qwen3ForCausalLM` 同时承载 dense Qwen3 和 Qwen3MoE。配置显式保存 `head_dim`，不能再假设它等于 `hidden_size / num_attention_heads`：本地 Qwen3-0.6B 的 hidden size 是 1024，但 16 个 query heads 的 head dimension 是 128，因此 Q projection 实际宽度为 2048。
@@ -273,7 +310,7 @@ token output。它是与 replicated-token + all-reduce 对照的 reference EP �
 
 decoder 每次重新解码累计 token，并维护已经发送的稳定前缀 `sent_text`。完整解码结果必须仍以 `sent_text` 开头，而且本轮候选前缀绝不能比它更短。例如 `我是 -> 我是AI` 时可以暂存 `AI`，但不能撤回已经发送的 `我是`；最终所有增量片段拼接后必须严格等于一次性完整解码结果。这个不变量由 tokenizer 回归测试覆盖。
 
-Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。
+Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。N-gram 统计分开记录草稿数和被接受草稿数；bonus/纠错 token 是主模型正常输出，不计入 accepted draft。
 
 本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 Qwen3-30B-A3B 也已在 4×RTX 4090 上完成 BF16/FA2 加载、Transformers greedy token oracle 和 naive/sorted 三轮性能验收，详见 [实测报告](../benchmarks/results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
 

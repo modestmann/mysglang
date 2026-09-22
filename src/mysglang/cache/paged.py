@@ -803,6 +803,21 @@ class PagedKVCache:
         for request_id, end in zip(batch.request_ids, batch.ends):
             self._lengths[request_id] = [end] * self.num_layers
 
+    def truncate(self, request_id: str, length: int) -> None:
+        """Roll an active request back without releasing its reusable pages.
+
+        Speculative verification may write K/V for rejected candidates. Lowering
+        the logical length makes those slots unreachable; a later append safely
+        overwrites them, while the request keeps its existing page reservation.
+        """
+        self._validate_request(request_id)
+        if not isinstance(length, int) or isinstance(length, bool):
+            raise TypeError("length must be an integer")
+        current = self.lengths((request_id,))[0]
+        if not 0 <= length <= current:
+            raise ValueError("truncated length must be within the current cache length")
+        self._lengths[request_id] = [length] * self.num_layers
+
     def release_request(self, request_id: str) -> tuple[int, ...]:
         self._validate_request(request_id)
         self._lengths.pop(request_id)

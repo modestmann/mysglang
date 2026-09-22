@@ -51,6 +51,23 @@ class PageAllocatorTest(unittest.TestCase):
 
 class PagedKVCacheTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_truncate_hides_speculative_suffix_without_releasing_pages(self) -> None:
+        self.assertTrue(self.cache.reserve_request("rollback", 8))
+        self.cache.ensure_capacity("rollback", 5)
+        self.model(
+            torch.tensor([[1, 2, 3, 4, 5]]),
+            kv_cache=self.cache,
+            cache_request_ids=("rollback",),
+        )
+        table = self.cache.allocator.page_table("rollback")
+
+        self.cache.truncate("rollback", 3)
+
+        self.assertEqual(self.cache.lengths(("rollback",)), (3,))
+        self.assertEqual(self.cache.allocator.page_table("rollback"), table)
+        self.cache.check_integrity()
+
+    @torch.inference_mode()
     def test_decode_metadata_buffer_keeps_addresses_and_commits_once(self) -> None:
         for request_id, prompt in (("a", [1, 2, 3]), ("b", [4])):
             self.assertTrue(self.cache.reserve_request(request_id, 8))

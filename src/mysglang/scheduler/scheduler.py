@@ -36,6 +36,7 @@ from mysglang.modeling.qwen3 import Qwen3ForCausalLM
 
 from .config import SchedulerConfig
 from .coordination import SchedulerBatchPlan, SchedulerCoordinator
+from .ngram import NGramProposer
 from .sampler import sample_token
 
 
@@ -67,6 +68,9 @@ class SchedulerStats:
     prefill_input_tokens: int
     cuda_graph_captures: int
     cuda_graph_replays: int
+    speculative_verify_forwards: int
+    speculative_draft_tokens: int
+    speculative_accepted_tokens: int
 
 
 @dataclass
@@ -142,6 +146,13 @@ class Scheduler:
         self._max_wait_steps = 0
         # 只保留累计量，不保存无限增长的逐步 history。
         self._prefill_input_tokens = 0
+        self._ngram_proposer = NGramProposer(
+            min_match=config.speculative_ngram_min_match,
+            max_match=config.speculative_ngram_max_match,
+        )
+        self._speculative_verify_forwards = 0
+        self._speculative_draft_tokens = 0
+        self._speculative_accepted_tokens = 0
 
     @property
     def has_work(self) -> bool:
@@ -168,6 +179,9 @@ class Scheduler:
             prefill_input_tokens=self._prefill_input_tokens,
             cuda_graph_captures=graph_stats.captures if graph_stats else 0,
             cuda_graph_replays=graph_stats.replays if graph_stats else 0,
+            speculative_verify_forwards=self._speculative_verify_forwards,
+            speculative_draft_tokens=self._speculative_draft_tokens,
+            speculative_accepted_tokens=self._speculative_accepted_tokens,
         )
 
     def validate(self, request: Request) -> None:
@@ -402,6 +416,12 @@ class Scheduler:
 
     def _decode_step(self) -> SchedulerStep:
         entries = list(self._running.values())
+        drafts = tuple(self._speculative_draft(entry.request) for entry in entries)
+        if any(drafts):
+            return self._speculative_decode_step(entries, drafts)
+        return self._single_token_decode_step(entries)
+
+    def _single_token_decode_step(self, entries: list[_Entry]) -> SchedulerStep:
         request_ids = tuple(entry.request.request_id for entry in entries)
         lengths = self.cache.lengths(request_ids)
         for request_id, length in zip(request_ids, lengths):
@@ -466,6 +486,157 @@ class Scheduler:
             input_tokens=len(entries),
             outputs=tuple(outputs),
         )
+
+    def _speculative_decode_step(
+        self,
+        entries: list[_Entry],
+        drafts: tuple[tuple[int, ...], ...],
+    ) -> SchedulerStep:
+        """Verify ragged n-gram candidate chains with one packed target forward."""
+        request_ids = tuple(entry.request.request_id for entry in entries)
+        starts = self.cache.lengths(request_ids)
+        append_lengths = tuple(1 + len(draft) for draft in drafts)
+        packed_tokens: list[int] = []
+        for entry, draft, start, append_length in zip(
+            entries, drafts, starts, append_lengths
+        ):
+            self.cache.ensure_capacity(entry.request.request_id, start + append_length)
+            packed_tokens.append(entry.request.last_output_token_id)
+            packed_tokens.extend(draft)
+
+        self._validate_batch_plan(
+            phase="decode",
+            execution="ngram-verify",
+            request_ids=request_ids,
+            input_token_ids=tuple(packed_tokens),
+            append_lengths=append_lengths,
+            logits_indices=None,
+        )
+        logits = self.model.forward_packed(
+            torch.tensor(packed_tokens, dtype=torch.long, device=self._device),
+            kv_cache=self.cache,
+            cache_request_ids=request_ids,
+            append_lengths=append_lengths,
+            logits_indices=None,
+        )
+
+        proposed_outputs: list[tuple[int, ...]] = []
+        offset = 0
+        for entry, draft, append_length in zip(entries, drafts, append_lengths):
+            request_logits = logits[offset : offset + append_length]
+            offset += append_length
+            if not draft:
+                proposed_outputs.append((self._sample(request_logits[0], entry.request),))
+                continue
+
+            target_tokens = request_logits.argmax(dim=-1).tolist()
+            accepted = 0
+            while accepted < len(draft) and target_tokens[accepted] == draft[accepted]:
+                accepted += 1
+            # A rejection contributes the target correction at that position;
+            # accepting every draft contributes the final bonus token instead.
+            candidate_output = draft[:accepted] + (target_tokens[accepted],)
+            proposed_outputs.append(
+                self._truncate_speculative_output(entry.request, candidate_output)
+            )
+
+        emitted = self._sync_speculative_outputs(tuple(proposed_outputs), append_lengths)
+        accepted_counts = tuple(
+            self._accepted_prefix_length(output, draft)
+            for output, draft in zip(emitted, drafts)
+        )
+        # The model wrote every candidate K/V. Keep exactly the prefix preceding
+        # the newest emitted token and make rejected candidate slots unreachable.
+        for request_id, start, output in zip(request_ids, starts, emitted):
+            self.cache.truncate(request_id, start + len(output))
+
+        self._model_forwards += 1
+        self._max_decode_batch_size = max(self._max_decode_batch_size, len(entries))
+        self._speculative_verify_forwards += 1
+        self._speculative_draft_tokens += sum(map(len, drafts))
+        self._speculative_accepted_tokens += sum(accepted_counts)
+
+        outputs = []
+        for entry, token_ids in zip(entries, emitted):
+            for token_id in token_ids:
+                event = entry.request.record_token(token_id)
+                outputs.append(event)
+                if event.finished:
+                    self._running.pop(entry.request.request_id)
+                    self._release(entry, finished=True)
+                    break
+
+        return SchedulerStep(
+            index=self._step_index,
+            phase="decode",
+            request_ids=request_ids,
+            input_tokens=sum(append_lengths),
+            outputs=tuple(outputs),
+        )
+
+    def _speculative_draft(self, request: Request) -> tuple[int, ...]:
+        if self.config.speculative_ngram_max_tokens == 0:
+            return ()
+        if not request.sampling_params.is_greedy:
+            return ()
+        # A k-token draft may return k accepted tokens plus one bonus token.
+        remaining = request.sampling_params.max_new_tokens - request.num_output_tokens
+        max_tokens = min(self.config.speculative_ngram_max_tokens, remaining - 1)
+        if max_tokens <= 0:
+            return ()
+        return self._ngram_proposer.propose(request.all_token_ids, max_tokens)
+
+    @staticmethod
+    def _accepted_prefix_length(output: tuple[int, ...], draft: tuple[int, ...]) -> int:
+        accepted = 0
+        while accepted < len(draft) and accepted < len(output):
+            if output[accepted] != draft[accepted]:
+                break
+            accepted += 1
+        return accepted
+
+    @staticmethod
+    def _truncate_speculative_output(
+        request: Request,
+        output: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        """Stop a multi-token result at the same boundary as repeated record_token calls."""
+        remaining = request.sampling_params.max_new_tokens - request.num_output_tokens
+        result = output[:remaining]
+        params = request.sampling_params
+        if params.eos_token_id is not None and not params.ignore_eos:
+            try:
+                eos_index = result.index(params.eos_token_id)
+            except ValueError:
+                pass
+            else:
+                result = result[: eos_index + 1]
+        return result
+
+    def _sync_speculative_outputs(
+        self,
+        outputs: tuple[tuple[int, ...], ...],
+        append_lengths: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], ...]:
+        counts = tuple(map(len, outputs))
+        flattened = tuple(token for output in outputs for token in output)
+        synchronized = self._sync_token_ids(counts + flattened)
+        batch_size = len(outputs)
+        authoritative_counts = synchronized[:batch_size]
+        authoritative_tokens = synchronized[batch_size:]
+        if any(
+            count <= 0 or count > append_length
+            for count, append_length in zip(authoritative_counts, append_lengths)
+        ):
+            raise RuntimeError("coordinator returned invalid speculative output lengths")
+        if sum(authoritative_counts) != len(authoritative_tokens):
+            raise RuntimeError("coordinator returned malformed speculative token IDs")
+        rebuilt = []
+        offset = 0
+        for count in authoritative_counts:
+            rebuilt.append(authoritative_tokens[offset : offset + count])
+            offset += count
+        return tuple(rebuilt)
 
     def _release(self, entry: _Entry, *, finished: bool) -> None:
         request = entry.request

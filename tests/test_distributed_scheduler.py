@@ -68,6 +68,7 @@ def _distributed_scheduler_worker(
     state_dict: dict[str, torch.Tensor],
     expected: dict[str, tuple[int, ...]],
     moe_dispatch_backend: str,
+    use_speculative: bool,
 ) -> None:
     os.environ["GLOO_SOCKET_IFNAME"] = "lo"
     dist.init_process_group(
@@ -91,8 +92,20 @@ def _distributed_scheduler_worker(
                 prefill_token_budget=3,
                 num_pages=16,
                 page_size=2,
+                speculative_ngram_max_tokens=2 if use_speculative else 0,
             ),
         )
+        if use_speculative:
+            prompts = {"left": (1, 2, 3, 4, 5), "right": (6, 7)}
+
+            def propose(history: tuple[int, ...], max_tokens: int) -> tuple[int, ...]:
+                request_id, prompt = next(
+                    (item for item in prompts.items() if history[: len(item[1])] == item[1]),
+                )
+                generated = len(history) - len(prompt)
+                return expected[request_id][generated : generated + max_tokens]
+
+            scheduler._scheduler._ngram_proposer.propose = propose
 
         if rank != 0:
             scheduler.run_worker_loop()
@@ -122,6 +135,9 @@ def _distributed_scheduler_worker(
         assert "decode" in phases
         assert {key: tuple(value) for key, value in actual.items()} == expected
         assert scheduler.stats.finished_requests == 2
+        if use_speculative:
+            assert scheduler.stats.speculative_verify_forwards == 1
+            assert scheduler.stats.speculative_accepted_tokens == 1
         scheduler.shutdown()
         scheduler.check_integrity()
     finally:
@@ -161,6 +177,7 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                     state_dict,
                     expected,
                     "sorted",
+                    False,
                 ),
                 nprocs=2,
                 join=True,
@@ -204,6 +221,45 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                     state_dict,
                     expected,
                     "all_to_all",
+                    False,
+                ),
+                nprocs=2,
+                join=True,
+            )
+
+    @unittest.skipUnless(
+        dist.is_available() and dist.is_gloo_available(),
+        "requires torch.distributed with Gloo",
+    )
+    def test_tp2_ngram_verification_matches_tp1(self) -> None:
+        torch.manual_seed(323)
+        config = ModelConfig(
+            vocab_size=32,
+            hidden_size=24,
+            intermediate_size=48,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=16,
+        )
+        reference = Qwen3ForCausalLM(config).eval()
+        state_dict = _hugging_face_layout(reference)
+        expected = {
+            "left": _reference_generate(reference, (1, 2, 3, 4, 5), 3),
+            "right": _reference_generate(reference, (6, 7), 2),
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(
+                _distributed_scheduler_worker,
+                args=(
+                    2,
+                    f"file://{directory}/process-group",
+                    config,
+                    state_dict,
+                    expected,
+                    "sorted",
+                    True,
                 ),
                 nprocs=2,
                 join=True,

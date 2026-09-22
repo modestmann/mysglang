@@ -92,6 +92,14 @@ def _parser() -> argparse.ArgumentParser:
         help="capture the greedy B=1 Decode, including NCCL TP and triton_grouped MoE",
     )
     parser.add_argument(
+        "--speculative-ngram-max-tokens",
+        type=int,
+        default=0,
+        help="maximum model-free n-gram draft length; 0 disables speculative decoding",
+    )
+    parser.add_argument("--speculative-ngram-min-match", type=int, default=2)
+    parser.add_argument("--speculative-ngram-max-match", type=int, default=8)
+    parser.add_argument(
         "--tensor-parallel-size",
         type=int,
         help="expected torchrun world size; inferred from WORLD_SIZE when omitted",
@@ -193,6 +201,9 @@ def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
         num_pages=args.num_pages,
         page_size=page_size,
         decode_cuda_graph_batch_sizes=graph_batch_sizes,
+        speculative_ngram_max_tokens=args.speculative_ngram_max_tokens,
+        speculative_ngram_min_match=args.speculative_ngram_min_match,
+        speculative_ngram_max_match=args.speculative_ngram_max_match,
     )
 
 

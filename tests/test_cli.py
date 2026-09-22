@@ -41,6 +41,22 @@ class CliTensorParallelLaunchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LOCAL_RANK selects it"):
             _rank_device("cuda:0", launch)
 
+    def test_ngram_speculative_flags_are_explicit(self) -> None:
+        args = _parser().parse_args(
+            [
+                "--speculative-ngram-max-tokens",
+                "4",
+                "--speculative-ngram-min-match",
+                "3",
+                "--speculative-ngram-max-match",
+                "12",
+            ]
+        )
+
+        self.assertEqual(args.speculative_ngram_max_tokens, 4)
+        self.assertEqual(args.speculative_ngram_min_match, 3)
+        self.assertEqual(args.speculative_ngram_max_match, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

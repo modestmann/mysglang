@@ -50,6 +50,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefill-token-budget", type=int)
     parser.add_argument("--warmup-new-tokens", type=int, default=4)
     parser.add_argument("--cuda-graph", action="store_true")
+    parser.add_argument("--speculative-ngram-max-tokens", type=int, default=0)
+    parser.add_argument("--speculative-ngram-min-match", type=int, default=2)
+    parser.add_argument("--speculative-ngram-max-match", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -197,7 +200,7 @@ def _gpu_summary(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _scheduler_delta(before: Any, after: Any) -> dict[str, int]:
+def _scheduler_delta(before: Any, after: Any) -> dict[str, int | float]:
     cumulative = {
         "finished_requests",
         "aborted_requests",
@@ -205,10 +208,17 @@ def _scheduler_delta(before: Any, after: Any) -> dict[str, int]:
         "prefill_input_tokens",
         "cuda_graph_captures",
         "cuda_graph_replays",
+        "speculative_verify_forwards",
+        "speculative_draft_tokens",
+        "speculative_accepted_tokens",
     }
     result = asdict(after)
     for name in cumulative:
         result[name] -= getattr(before, name)
+    draft_tokens = result["speculative_draft_tokens"]
+    result["speculative_acceptance_rate"] = (
+        result["speculative_accepted_tokens"] / draft_tokens if draft_tokens else 0.0
+    )
     return result
 
 
@@ -249,6 +259,11 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "num_pages": args.num_pages,
             "prefill_token_budget": args.prefill_token_budget,
             "cuda_graph": args.cuda_graph,
+            "speculative_ngram": {
+                "max_tokens": args.speculative_ngram_max_tokens,
+                "min_match": args.speculative_ngram_min_match,
+                "max_match": args.speculative_ngram_max_match,
+            },
             "sampling": {
                 "temperature": args.temperature,
                 "top_k": args.top_k,

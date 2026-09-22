@@ -56,6 +56,26 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 .venv/bin/python benchmarks/validate_transformers.p
 
 这里的 Transformers `device_map` 只是低吞吐正确性 oracle，不作为 TP/EP 性能对照。
 
+N-gram 投机要在同一 greedy workload 上做开/关 A/B，并先确认输出 token ID 完全一致：
+
+```bash
+PYTHONPATH=src .venv/bin/python benchmarks/benchmark_generation.py \
+  --model /root/models/Qwen3-0.6B --name ngram-off \
+  --concurrency 8 --prompt-tokens 128 --max-new-tokens 128
+
+PYTHONPATH=src .venv/bin/python benchmarks/benchmark_generation.py \
+  --model /root/models/Qwen3-0.6B --name ngram-4 \
+  --concurrency 8 --prompt-tokens 128 --max-new-tokens 128 \
+  --speculative-ngram-max-tokens 4 \
+  --speculative-ngram-min-match 2 --speculative-ngram-max-match 8
+```
+
+JSONL 的 scheduler 部分会记录 `speculative_draft_tokens`、
+`speculative_accepted_tokens`、`speculative_acceptance_rate` 和
+`speculative_verify_forwards`。确认 token 对齐后，再比较
+output tokens/s、ITL、`model_forwards` 及接受率。高重复 synthetic prompt 只表示机制上界，
+正式结论还应包含真实对话和代码 workload。
+
 已有实测报告：
 
 - [Qwen3-0.6B：RTX 4090 ×4](results/2026-09-21-4090x4/report.md)；

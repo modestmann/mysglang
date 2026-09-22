@@ -9,6 +9,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - 可切换的 PyTorch reference / FlashAttention 2 attention backend；
 - 一次 forward 构造、所有 Transformer 层复用的 Paged KV batch metadata；
 - 固定地址 Decode metadata buffer 与可选的精确 batch-size CUDA Graph；
+- 无草稿模型的 n-gram 投机解码、packed 主模型验证与 KV 逻辑回滚；
 - 真实 dense Qwen3 / Qwen3MoE 统一架构、fused QKV 与 fused gate/up；
 - SafeTensors 加载、Hugging Face chat template、增量 detokenization；
 - greedy、temperature、top-k、top-p 与 per-request seed 采样；
@@ -104,6 +105,19 @@ worker loop。`--tensor-parallel-size` 是防止启动参数写错的校验项�
 `--nproc-per-node`。`--cuda-graph` 可以捕获固定 B=1 Decode；TP 使用 NCCL Graph，MoE
 还必须选择 `--moe-dispatch triton_grouped`。这两条新路径仍待目标服务器实测。
 
+高重复度的 greedy 输出可以显式打开 n-gram 投机解码：
+
+```bash
+PYTHONPATH=src python -m mysglang.cli \
+  --speculative-ngram-max-tokens 4 \
+  --speculative-ngram-min-match 2 \
+  --speculative-ngram-max-match 8
+```
+
+它从当前请求的历史 token 复制候选续写，再由主模型一次验证。默认值 `0`
+表示关闭。temperature 采样仍走普通单 token 路径，因为历史 n-gram 查找不提供
+草稿概率分布。
+
 MoE 提供五条可对照路径：`naive` 为逐 expert 扫描基线；默认 `sorted` 一次筛选并按
 expert 分组，但仍逐 expert GEMM；`grouped` 将活跃 experts 填充成 batched matrices，
 用两次 `bmm` 替代 Python GEMM loop；`triton_grouped` 用 expert offsets 直接计算真实
@@ -123,6 +137,8 @@ assignments，并将 gate/up GEMM 与 SwiGLU 融合，不再填充到最忙 expe
   Graph；TP/NCCL capture 尚待云端验证，ragged/mixed metadata 仍由 Python 构造；
 - 已完成 dense 模型级 TP、MoE expert 分片、checkpoint 分片加载、rank worker/batch-plan
   广播和 `torchrun` CLI 启动链；尚待多进程容错或正式 benchmark client；
+- n-gram 投机当前以有界历史扫描产生一条候选链，尚未实现 SGLang 更完整的
+  per-request trie/token tree，也不对随机采样做概率上的精确验证；
 - 第一版只关注文本生成，不覆盖 VLM、量化、LoRA 和复杂 grammar。
 
 这些限制属于明确的后续工作，不应被当前 reference 路径的正确性掩盖。

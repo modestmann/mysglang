@@ -19,6 +19,8 @@
 - Scheduler 内部固定使用 continuous batching、paged KV pool 和 radix prefix cache，不再选择旧后端；
 - `GenerationService.start()` 只创建并校验 session，首次消费时才 enqueue 和占用运行资源；
 - Prompt Prefill 完成后立即发布完整页，后到请求可在发布者仍 Decode 时复用；
+- 可选的无模型 n-gram 投机解码以一次 packed 主模型 forward 验证变长候选链，
+  逻辑回滚被拒绝 KV，并保持 TP rank 一致；
 - Scheduler 不保存无限增长的逐步记录，只累计包括 `prefill_input_tokens` 在内的统计；
 - 核心回归覆盖 Request 状态、allocator/Radix 不变量、abort 清理和生成对齐。
 
@@ -120,7 +122,7 @@ Qwen3-30B-A3B 的四卡显存、token、吞吐及 sorted/grouped/all-to-all A/B 
 
 ## 7. 可选方向
 
-- speculative decoding；
+- 更完整的 n-gram trie/token tree、草稿模型投机和精确随机采样验证；
 - host/disk 分层 KV Cache 与异步预取；
 - cache-aware routing 和跨实例前缀复用；
 - 量化、LoRA、grammar constrained decoding；
