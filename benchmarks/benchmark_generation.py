@@ -335,7 +335,7 @@ async def _main(args: argparse.Namespace) -> None:
     finally:
         try:
             if runtime.service is not None:
-                runtime.service.close()
+                await runtime.service.aclose()
         finally:
             if runtime.owns_process_group and dist.is_initialized():
                 dist.destroy_process_group()

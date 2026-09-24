@@ -5,7 +5,11 @@ from unittest.mock import patch
 
 import torch
 
-from mysglang.cli import _parser, _rank_device, _read_distributed_launch
+from mysglang.cli import _LoadedRuntime, _parser, _rank_device, _read_distributed_launch, _run
+from mysglang.scheduler import SchedulerConfig
+from mysglang.serving import GenerationService
+from mysglang.tokenizer import ByteTokenizer
+from tests.helpers import make_model
 
 
 class CliTensorParallelLaunchTest(unittest.TestCase):
@@ -56,6 +60,23 @@ class CliTensorParallelLaunchTest(unittest.TestCase):
         self.assertEqual(args.speculative_ngram_max_tokens, 4)
         self.assertEqual(args.speculative_ngram_min_match, 3)
         self.assertEqual(args.speculative_ngram_max_match, 12)
+
+
+class CliShutdownTest(unittest.IsolatedAsyncioTestCase):
+    async def test_exit_after_generation_waits_for_worker(self) -> None:
+        service = GenerationService(
+            make_model(seed=789, vocab_size=256, max_position_embeddings=128),
+            ByteTokenizer(),
+            SchedulerConfig(max_running_requests=1, num_pages=48, page_size=4),
+        )
+        args = _parser().parse_args(["--max-new-tokens", "2"])
+
+        with patch("mysglang.cli._load_runtime", return_value=_LoadedRuntime(service)):
+            with patch("builtins.input", side_effect=["hi", "/exit"]):
+                await _run(args)
+
+        self.assertEqual(service.stats.finished_requests, 1)
+        self.assertIsNone(service._worker_task)
 
 
 if __name__ == "__main__":

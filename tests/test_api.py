@@ -66,6 +66,15 @@ class GenerationServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.stats.finished_requests, 2)
         self.assertEqual(service.stats.active_requests, 0)
 
+    async def test_aclose_waits_for_worker_after_generation(self) -> None:
+        service = make_service()
+        tokens = await collect_token_ids(service.start("hello", max_new_tokens=2))
+
+        self.assertEqual(len(tokens), 2)
+        await service.aclose()
+        self.assertIsNone(service._worker_task)
+        self.assertEqual(service.stats.active_requests, 0)
+
     async def test_closing_stream_aborts_and_releases_request(self) -> None:
         service = make_service()
         session = service.start("shared-prefix/cancel-me", max_new_tokens=8)

@@ -57,7 +57,7 @@ from mysglang.tokenizer import HuggingFaceTokenizer
 
 
 def _default_model_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "KuiperLLama/artifacts/qwen3-0.6b/hf-source"
+    return Path(__file__).resolve().parents[3] / "KuiperQwen3/artifacts/qwen3-0.6b/hf-source"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -361,7 +361,7 @@ async def _run(args: argparse.Namespace) -> None:
     finally:
         try:
             if runtime.service is not None:
-                runtime.service.close()
+                await runtime.service.aclose()
         finally:
             if runtime.owns_process_group and dist.is_initialized():
                 dist.destroy_process_group()

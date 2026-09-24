@@ -98,6 +98,13 @@ class GenerationService:
         else:
             self.scheduler.close()
 
+    async def aclose(self) -> None:
+        """Wait for the shared worker to finish before releasing its Scheduler."""
+        worker_task = self._worker_task
+        if worker_task is not None:
+            await worker_task
+        self.close()
+
     def start(
         self,
         prompt: str,
