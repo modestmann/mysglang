@@ -63,6 +63,8 @@ BatchPlan，使所有进程以相同顺序进入模型 collective。详细边界
 | PageAllocator | 物理页、页表、容量承诺 | attention 数学计算 |
 | RadixPrefixCache | token 前缀到 cached pages 的索引和保护 | 存放 K/V tensor |
 | PagedKVCache | 真正的逐层 K/V pool | 请求到达与输出传输 |
+| RecurrentStatePool | DeltaNet 每请求的 conv/递归状态 slot | K/V 页面与前缀索引 |
+| HybridPagedKVCache | 同一请求的页、MTP 草稿 K/V、状态 slot 一起登记与释放 | 调度策略 |
 | Model | hidden states、Q/K/V 投影和 logits | 请求生命周期 |
 | AttentionBackend | KV 写入、attention kernel 与输出 | 调度策略和请求生命周期 |
 | TensorParallelContext | 当前 rank、TP 大小和模型 collective group | 请求调度与进程启动 |
@@ -513,7 +515,118 @@ align_down(len(prompt) - 1, page_size)
 
 第三种方案仍需让该 token 依次经过所有 Transformer layers，因为后一层的 Q 依赖前一层 hidden state；在 fused QKV 模型中也未必能廉价地只算 Q。若还要共享可继续写入的部分页，则必须增加 copy-on-write。它们是工程权衡，不是当前 KV 正确性的缺陷。
 
-## 8. 与 Mini-SGLang 的关系
+## 8. Qwen3.5/3.6 混合架构：DeltaNet、MTP 与 FP8
+
+目标模型 `Qwen/Qwen3.6-35B-A3B-FP8`（`model_type=qwen3_5_moe`）与 Qwen3MoE 的差异集中在三处：token mixer 变成"3 层 Gated DeltaNet + 1 层 Gated Attention"交替、多了 1 层 MTP 头、权重是 128×128 分块 FP8。同一个 `Qwen3ForCausalLM` 按配置承载 dense/MoE Qwen3 与 Qwen3.5 家族；本地用同架构的 `Qwen3.5-0.8B`（dense MLP，同样有 DeltaNet 与 MTP）做真实权重验收。
+
+| 项 | 35B-A3B 配置 | 实现位置 |
+|---|---|---|
+| 层类型 | 40 层，`layer_types` 每 4 层一个 `full_attention` | `Qwen3DecoderLayer` 按类型选择 mixer |
+| Gated Attention | 16 Q / 2 KV 头，head_dim 256；`q_proj` 每头输出 `[query, gate]`，输出乘 `sigmoid(gate)` | `Qwen3Attention.output_gate` |
+| 部分 RoPE | `partial_rotary_factor=0.25`，只旋转前 64 维；文本 M-RoPE 三段位置相同，退化为 1-D RoPE | `RotaryEmbedding.rotary_dim` |
+| RMSNorm | 权重零中心，乘 `1 + w`（float32 计算后再 cast） | `RMSNorm(zero_centered=True)` |
+| Gated DeltaNet | 16 K 头 / 32 V 头，维度 128，causal conv kernel 4 | `modeling/deltanet.py` |
+| MoE | 256 选 8，softmax 后 top-k 归一化；另有 shared expert，乘 `sigmoid(shared_expert_gate(x))` | `Qwen3SparseMoeBlock.shared_expert` |
+| MTP | 1 层 full-attention MoE decoder，共享 embed 与 lm_head | `Qwen3_5MultiTokenPredictor` |
+
+### Gated DeltaNet 与递归状态池
+
+每个 value head 维护矩阵状态 `S ∈ R^{dk×dv}`，每个 token 执行：
+
+```text
+S = exp(g_t) · S                      # 数据相关的衰减，g = -exp(A_log)·softplus(a + dt_bias)
+S = S + k_t ⊗ β_t (v_t − Sᵀ k_t)      # delta rule：只写入"预测误差"
+o_t = Sᵀ q_t                           # q/k 先做 L2 norm，q 再乘 1/sqrt(dk)
+```
+
+投影之后先过一个 depthwise causal conv（kernel 4）+ SiLU，因此每层的"历史"就是：最近 3 个 conv 输入 + 一个 `[heads, 128, 128]` 的 float32 状态。它们与序列长度无关，存放在 `RecurrentStatePool` 的 slot 中，而不是 paged KV：
+
+```text
+HybridPagedKVCache（一个请求的所有缓存资源都由它登记和释放）
+  ├─ 继承的 paged K/V：只有 10 个 full-attention 层
+  ├─ PagedKVCompanion：MTP 层的 K/V，与目标共享页表，但单独记录逻辑长度
+  └─ RecurrentStatePool：每请求一个 slot（30 层 conv_state + ssm_state）
+```
+
+Admission 同时预留页和 slot（slot 数 = `max_running_requests`），完成或 abort 时一起释放；`check_integrity()` 额外检查 slot 所有权与活跃请求一致。Prefill 按 chunk 推进时状态在 slot 里自然接力，所以 chunked prefill 和 mixed batch 不需要特殊处理。
+
+Kernel 选择与 attention backend 相同的两层结构：PyTorch reference 对多 token 段用 chunk 算法（与 HF 相同），对 Decode/verify 用逐 token 递归；CUDA 上默认使用 fla（flash-linear-attention）的 varlen chunk 与 fused recurrent kernel。
+
+**为什么混合模型关闭 radix 前缀复用。** Radix 复用依赖"前缀的缓存可以按页截取"。K/V 满足这一点，递归状态不满足：它只在"恰好处理到这个位置"时有效，无法从页面恢复。当前 `HybridPagedKVCache` 把 `enable_prefix_cache` 设为 False（仍走同一套 reservation/handle 路径，只是永远匹配根节点）。后续若要复用，需要在 radix 节点上存状态快照（SGLang 的 MambaRadixCache 思路）。
+
+### 投机验证与状态回滚
+
+Paged K/V 的回滚只要降低逻辑长度；递归状态已经吸收了被拒绝的 token，无法事后截断。因此 verify 前向对 DeltaNet 使用 **log 模式**：各层只读 slot、不写回，同时记录每个 token 的 conv 输入与 q/k/v/g/β。接受长度确定后，再从原状态 replay 被吸收的 token：
+
+- 被吸收的 token 恰好是 `[上轮最后一个 token] + 已接受草稿`，数量等于本轮输出 token 数；
+- 等宽 verify（MTP 的常见情形）使用 **掩码 replay**：把未接受位置的 `g` 与 `β` 置 0，于是 `exp(0)=1` 且修正量为 0，这些 token 成为恒等更新；形状固定，因此可以进入 CUDA Graph；
+- 变长 verify（n-gram）只挑出被接受的行再递归。
+
+这套机制对 n-gram 与 MTP 通用；因此 n-gram 仍保留，作为没有 MTP 权重的 Qwen3 模型的投机方案和 MTP 的 A/B 基线。
+
+### MTP：数据流与不变量
+
+MTP 在位置 `p` 的输入是 `fc([norm(embed(t_{p+1})), norm(h_p)])`，`h_p` 是目标模型 final norm 之后的 hidden（已用 0.8B 实测：post-norm 接受率 69.5%，pre-norm 63.1%）。它写 K/V 的位置与目标完全相同，所以 MTP K/V 与目标共享页表。
+
+调度器维护的不变量是：**两步之间，MTP 草稿层的长度恰好等于目标长度，且每个运行中的请求都已备好下一轮首个草稿 `d1`**。
+
+```text
+任意一次目标前向（prefill chunk / mixed / decode / verify）之后：
+  追赶（catch-up）：对刚处理的同一批位置运行 MTP，行 p 配对 t_{p+1}
+    - 未完成的 prompt chunk：t_{p+1} 取下一个 prompt token
+    - 完成 prompt 或 decode：取刚采样/接受的 token
+  最后一行的 logits → 下一轮 d1，MTP hidden → 下一步递归输入
+
+一轮投机（k 个草稿）：
+  草稿步 j=2..k：MTP 在位置 L+j-2 输入 (上一步 MTP hidden, d_{j-1}) → d_j
+  verify：目标一次处理 [t_L, d1..dk]（DeltaNet 为 log 模式）
+  接受：greedy 比较，得到 n 个接受 + 1 个 bonus/修正
+  回滚：目标 K/V 截到 L+n+1；DeltaNet replay n+1 个 token；MTP K/V 截回 L
+  追赶：MTP 用目标 hidden 处理位置 L..L+n，重新与目标对齐
+```
+
+草稿步只能用 MTP 自己的输出 hidden 近似"下一位置的目标 hidden"，因为后者要等 verify 才知道；追赶步随后用真实目标 hidden 覆盖这些位置。所有请求都可以起草，验证规则保证输出分布与逐 token 生成完全相同（`sampler.speculative_accept`）：
+
+- greedy：逐位置比较草稿与"施加 presence/frequency penalty 后的目标 argmax"，penalty 的历史包含本轮已接受的草稿；
+- 随机采样：标准投机采样。草稿从 MTP 分布 q 采样（q 不叠加 penalty，只影响接受率），目标分布 p 逐位置按当前历史计算；以 `min(1, p(d)/q(d))` 接受，拒绝时从 `normalize(max(0, p − q))` 采样修正 token，全部接受时从最后一行采样 bonus；
+- n-gram 草稿和 greedy MTP 草稿是确定性的，等价于 `q = onehot(d)`，拒绝时的残差分布就是去掉 d 后重新归一化的 p。
+
+因此 Qwen3.6 官方推荐的采样设置（如 temperature=0.6/1.0、presence_penalty=1.5）下同样能用 MTP。
+
+**数值说明。** fp32 + PyTorch reference 后端下，MTP 开/关对 4 个并发请求的 96 个 token 逐位一致；bf16 + FA2/fla 下，verify 一次处理 `k+1` 个 token，GEMM/attention 的 kernel 形状与单 token Decode 不同，接近平局的 argmax 可能在几十个 token 后分叉。这是舍入差异，不是回滚错误（与 n-gram 的结论相同）。
+
+### CUDA Graph
+
+混合模型与 MTP 的 Decode 形状同样固定，Graph 覆盖四类 bucket：
+
+| 图 | 形状 | 说明 |
+|---|---|---|
+| Decode | `[B, 1]` | DeltaNet 通过固定地址的 slot buffer 读写状态 |
+| Verify | `[B, 1+k]` | DeltaNet 为 log 模式；随后的掩码提交也按 bucket 捕获 |
+| MTP 草稿步 | `[B, 1]` | 仅 MTP 头 + lm_head |
+| MTP 追赶 | `[B, 1+k]` | 满宽处理所有 verify 行，再把草稿 K/V 截到各自接受长度 |
+
+与纯 attention 模型不同，捕获前的预热会真实执行前向并推进 DeltaNet 状态，所以 runner 先对这些 slot 做快照、预热和捕获后恢复，真正的状态推进只由 replay 完成。等长批次的 DeltaNet 路径不创建任何 host 张量，fla 使用 `[batch, length]` 布局而不是 `cu_seqlens`。
+
+### 分块 FP8
+
+官方 FP8 checkpoint 把每个 Linear 存成 e4m3 权重 + 每个 128×128 tile 一个 float32 `weight_scale_inv`（真实权重 = fp8 × scale），激活为动态量化；embed、lm_head、norm、router gate、shared_expert_gate、DeltaNet 的 `in_proj_a/b`、conv、`mtp.fc` 和视觉塔保持 BF16（`modules_to_not_convert`，按模块路径片段匹配）。
+
+- `ColumnParallelLinear` / `RowParallelLinear` / `Qwen3Experts` 可持有 FP8 权重与 scale；loader 构造 meta 模型后只 cast 非量化参数；
+- CPU/reference 路径先反量化再 `F.linear`；CUDA 上的 Triton kernel 直接读 1 字节权重（W8A16），每个 K tile 落在同一个 scale block 内，部分和乘该列 block 的 scale；grouped MoE kernel 同样支持 scale；
+- TP 切分边界必须落在 128 的倍数上，scale 按同样的块边界切。35B 在 TP=4 下全部满足：`moe_intermediate_size=512` 走 EP 不切，shared expert 512/4=128 恰好一个 block；2 个 KV 头在 TP=4 时按 GQA 分组复制（rank 0/1 共用头 0）；
+- `fp8_weights=False`（CLI `--dequantize-fp8`）把 FP8 checkpoint 加载成 BF16，作为数值对照。
+
+`benchmarks/validate_checkpoint_layout.py` 只通过 HTTP Range 读取 SafeTensors 头部，在 meta device 上为每个 TP rank 构造模型并走真实 loader 映射。对 35B-A3B-FP8：64196 个张量在 TP=4 每个 rank 上全部映射成功、参数恰好覆盖，忽略的 333 个是视觉塔；每 rank 权重（含 MTP）约 9.98 GiB。
+
+### 接口
+
+- 停止 token 取 generation_config 与 tokenizer 的并集（Qwen 需要同时停在 `<|im_end|>` 和 `<|endoftext|>`）；
+- `presence_penalty` / `frequency_penalty` 只统计已生成 token（OpenAI 语义）；
+- `/v1/chat/completions`：thinking 模式下模板已以 `<think>\n` 结尾，输出在 `</think>` 前的部分进入 `reasoning_content`；`tools` 按 `qwen3_coder` XML 格式解析为 `tool_calls`（参数按 JSON schema 类型转换），流式时工具调用在最后一个 chunk 给出；`chat_template_kwargs` 透传给模板（如 `enable_thinking`、`preserve_thinking`）；只支持纯文本，图片/视频输入返回 400；
+- `python -m mysglang.server` 提供 OpenAI 兼容服务，TP 时只有 rank 0 监听。
+
+## 9. 与 Mini-SGLang 的关系
 
 以下比较固定基于本地 `/home/sheep/mini-sglang` 快照 `9a91cfa`，不代表其未来版本。
 
@@ -530,7 +643,7 @@ align_down(len(prompt) - 1, page_size)
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 
-## 9. 当前限制
+## 10. 当前限制
 
 - 本地只有 dense Qwen3-0.6B checkpoint；真实 Qwen3-30B-A3B 已在云端完成一次可复现验收，原始结果已归档；
 - MoE 已有 replicated-token all-reduce、padded-batched grouped GEMM、no-padding Triton
@@ -545,6 +658,10 @@ align_down(len(prompt) - 1, page_size)
 - dense TP 与真实 Qwen3-30B-A3B expert 分片均已在四张 RTX 4090 上通过 NCCL 实测；
   grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
   vocab parallel、worker 超时与故障恢复尚未完成；
-- HTTP 协议尚未由正式模型客户端与数据集评测。
+- HTTP 协议尚未由正式模型客户端与数据集评测；
+- Qwen3.5/3.6 混合模型关闭 radix 前缀复用（递归状态无法从页面恢复）；只做纯文本，视觉塔不加载；
+- MTP 每步只起草一条链（topk=1），尚未实现草稿树；
+- FP8 为 W8A16（权重 1 字节，激活仍为 BF16），尚未使用 Ada/Hopper 的 FP8 tensor core；
+- 真实 Qwen3.6-35B-A3B-FP8 只完成了离线布局校验，TP=4 的 token oracle、显存与性能仍需在 4×RTX 4090 上实测。
 
 后续顺序和验收边界见 [roadmap.md](roadmap.md)。

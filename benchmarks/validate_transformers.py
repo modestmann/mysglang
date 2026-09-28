@@ -16,6 +16,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--names", nargs="+", required=True)
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--prompt", help="must equal the benchmark's --prompt, if one was used")
     parser.add_argument(
         "--device-map",
         choices=("auto", "balanced", "balanced_low_0", "sequential"),
@@ -25,9 +26,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _fixed_prompt_ids(tokenizer: object, target: int) -> list[int]:
+def _fixed_prompt_ids(tokenizer: object, target: int, prompt: str | None = None) -> list[int]:
     seed = tokenizer.encode(
-        "性能测试：请简洁介绍大语言模型推理。",
+        prompt or "性能测试：请简洁介绍大语言模型推理。",
         add_special_tokens=False,
     )
     return (seed * ((target + len(seed) - 1) // len(seed)))[:target]
@@ -38,7 +39,7 @@ def main() -> None:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
-    prompt_ids = _fixed_prompt_ids(tokenizer, args.prompt_tokens)
+    prompt_ids = _fixed_prompt_ids(tokenizer, args.prompt_tokens, args.prompt)
     load_kwargs = {
         "local_files_only": True,
         "dtype": torch.bfloat16,

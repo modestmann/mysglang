@@ -86,7 +86,34 @@ Decode 与 packed verification 可能调用不同 BF16 kernel，临界 logits �
 舍入可以改变 greedy `argmax`。这类结果必须在报告中标注为数值分叉，
 不能既当作 KV/调度错误，也不能声称 bitwise 对齐通过。
 
+## Qwen3.5 / Qwen3.6：MTP、FP8 与离线布局校验
+
+`--speculative-mtp-steps k` 打开 checkpoint 自带 MTP 层的投机解码（与 n-gram 互斥）；
+JSONL 的 `speculative_draft_forwards` 统计 MTP 头自己的前向（递归草稿步 + 追赶步）。
+混合模型的 `--cuda-graph` 同时捕获 Decode、verify、MTP 草稿与追赶：
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_generation.py \
+  --model ~/models/Qwen3.5-0.8B --name c4-mtp2-graph \
+  --concurrency 4 --prompt-tokens 128 --max-new-tokens 256 --num-pages 8 \
+  --cuda-graph --speculative-mtp-steps 2
+```
+
+`make_fp8_checkpoint.py` 按官方 Qwen3.6 FP8 格式（128×128 块 + `weight_scale_inv`，
+同一组 BF16 例外模块）转换任意 BF16 checkpoint，便于在小显卡上验证 FP8 路径；
+`--dequantize-fp8` 加载同一 checkpoint 的反量化版本作为数值对照。
+
+`validate_checkpoint_layout.py` 只读取 SafeTensors 头部（远端 repo 用 HTTP Range），
+为每个 TP rank 在 meta device 上构造模型并走真实 loader 映射，检查分片形状与参数覆盖：
+
+```bash
+PYTHONPATH=src python benchmarks/validate_checkpoint_layout.py \
+  --repo Qwen/Qwen3.6-35B-A3B-FP8 --tensor-parallel-size 4 --enable-mtp
+```
+
 已有实测报告：
+
+- [Qwen3.5-0.8B：RTX 4060 Laptop，MTP × FP8 × CUDA Graph](results/2026-09-29-rtx4060-laptop-qwen3.5/report.md)；
 
 - [最终验收：Dense Graph、MoE Triton/Graph 与 n-gram](results/2026-09-23-final-4090x4/report.md)；
 - [Qwen3-0.6B：RTX 4090 ×4](results/2026-09-21-4090x4/report.md)；

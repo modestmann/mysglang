@@ -65,6 +65,11 @@ class HuggingFaceTokenizer:
         # Qwen's im_start/im_end and thinking markers.
         self.vocab_size = len(tokenizer)
         self.eos_token_id: int | None = tokenizer.eos_token_id
+        self.stop_token_ids: tuple[int, ...] = (
+            () if tokenizer.eos_token_id is None else (tokenizer.eos_token_id,)
+        )
+        # Qwen3/3.5 把推理写在 <think>...</think> 中；只有这类 tokenizer 需要拆出 reasoning。
+        self.supports_reasoning = "</think>" in tokenizer.get_vocab()
 
     @classmethod
     def from_pretrained(cls, model_path: str | Path) -> HuggingFaceTokenizer:
@@ -85,17 +90,23 @@ class HuggingFaceTokenizer:
 
     def apply_chat_template(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         *,
         enable_thinking: bool = True,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        **template_kwargs: Any,
     ) -> list[int]:
+        """Render and tokenize a chat; extra kwargs such as ``preserve_thinking`` reach
+        the Jinja template unchanged."""
         if not messages:
             raise ValueError("messages must not be empty")
         result = self._tokenizer.apply_chat_template(
-            list(messages),
+            [dict(message) for message in messages],
+            tools=list(tools) if tools else None,
             tokenize=True,
             add_generation_prompt=True,
             enable_thinking=enable_thinking,
+            **template_kwargs,
         )
         if isinstance(result, Mapping):
             result = result["input_ids"]

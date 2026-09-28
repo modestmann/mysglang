@@ -4,7 +4,7 @@ import asyncio
 import itertools
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from mysglang.core import FinishReason, IncrementalOutput, Request, SamplingParams
 from mysglang.modeling.qwen3 import Qwen3ForCausalLM
@@ -23,14 +23,18 @@ class IncrementalDecoder(Protocol):
 class Tokenizer(Protocol):
     vocab_size: int
     eos_token_id: int | None
+    stop_token_ids: tuple[int, ...]
+    supports_reasoning: bool
 
     def encode(self, text: str) -> Sequence[int]: ...
 
     def apply_chat_template(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         *,
         enable_thinking: bool = True,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        **template_kwargs: Any,
     ) -> Sequence[int]: ...
 
     def new_incremental_decoder(self) -> IncrementalDecoder: ...
@@ -81,6 +85,13 @@ class GenerationService:
         self.tokenizer = tokenizer
         # TP 时由 rank 0 注入分布式 facade；单卡仍沿用本地 Scheduler。
         self.scheduler = scheduler or Scheduler(model, scheduler_config)
+        # generation_config 与 tokenizer 各自声明的结束 token 都要生效（如 Qwen 的
+        # <|im_end|> 与 <|endoftext|>）。
+        self.stop_token_ids = tuple(
+            dict.fromkeys(
+                (*model.config.stop_token_ids, *getattr(tokenizer, "stop_token_ids", ()))
+            )
+        )
         self._request_ids = itertools.count()
         self._queues: dict[str, asyncio.Queue[IncrementalOutput | BaseException]] = {}
         self._worker_task: asyncio.Task[None] | None = None
@@ -116,6 +127,8 @@ class GenerationService:
         top_k: int = 0,
         top_p: float = 1.0,
         seed: int | None = None,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
     ) -> GenerationSession:
         prompt_token_ids = tuple(self.tokenizer.encode(prompt))
         return self._start_token_ids(
@@ -127,11 +140,13 @@ class GenerationService:
             top_k=top_k,
             top_p=top_p,
             seed=seed,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
         )
 
     def start_chat(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, Any]],
         *,
         max_new_tokens: int,
         eos_token_id: int | None = None,
@@ -141,11 +156,17 @@ class GenerationService:
         top_k: int = 0,
         top_p: float = 1.0,
         seed: int | None = None,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> GenerationSession:
         prompt_token_ids = tuple(
             self.tokenizer.apply_chat_template(
                 messages,
                 enable_thinking=enable_thinking,
+                tools=tools,
+                **dict(chat_template_kwargs or {}),
             )
         )
         return self._start_token_ids(
@@ -157,6 +178,8 @@ class GenerationService:
             top_k=top_k,
             top_p=top_p,
             seed=seed,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
         )
 
     def _start_token_ids(
@@ -170,7 +193,10 @@ class GenerationService:
         top_k: int,
         top_p: float,
         seed: int | None,
+        presence_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
     ) -> GenerationSession:
+        # 显式指定 eos_token_id 时只在它处停止；否则使用模型与 tokenizer 的全部结束 token。
         request = Request.from_token_ids(
             f"req-{next(self._request_ids)}",
             prompt_token_ids,
@@ -179,11 +205,14 @@ class GenerationService:
                 eos_token_id=(
                     self.tokenizer.eos_token_id if eos_token_id is None else eos_token_id
                 ),
+                stop_token_ids=self.stop_token_ids if eos_token_id is None else (),
                 ignore_eos=ignore_eos,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
                 seed=seed,
+                presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty,
             ),
         )
         self.scheduler.validate(request)

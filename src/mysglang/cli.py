@@ -51,8 +51,10 @@ from mysglang.modeling import (
     TensorParallelContext,
     TorchAttentionBackend,
 )
+from mysglang.modeling.deltanet import LINEAR_ATTENTION_BACKENDS
 from mysglang.scheduler import SchedulerConfig, TensorParallelScheduler
 from mysglang.serving import GenerationService
+from mysglang.serving.parsers import ReasoningParser
 from mysglang.tokenizer import HuggingFaceTokenizer
 
 
@@ -89,7 +91,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cuda-graph",
         action="store_true",
-        help="capture the greedy B=1 Decode, including NCCL TP and triton_grouped MoE",
+        help="capture greedy Decode (and MTP verify/draft steps), including NCCL TP",
+    )
+    parser.add_argument(
+        "--cuda-graph-batch-sizes",
+        type=int,
+        nargs="+",
+        help="exact Decode batch sizes to capture with --cuda-graph (default: 1)",
     )
     parser.add_argument(
         "--speculative-ngram-max-tokens",
@@ -99,6 +107,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--speculative-ngram-min-match", type=int, default=2)
     parser.add_argument("--speculative-ngram-max-match", type=int, default=8)
+    parser.add_argument(
+        "--speculative-mtp-steps",
+        type=int,
+        default=0,
+        help="draft tokens proposed by the checkpoint's MTP layer per round; 0 disables it",
+    )
+    parser.add_argument(
+        "--linear-attention-backend",
+        choices=LINEAR_ATTENTION_BACKENDS,
+        default="auto",
+        help="Gated DeltaNet kernels: fla on CUDA when installed, otherwise PyTorch",
+    )
+    parser.add_argument(
+        "--dequantize-fp8",
+        action="store_true",
+        help="load an FP8 checkpoint as --dtype weights (numerical reference path)",
+    )
+    parser.add_argument("--presence-penalty", type=float, default=0.0)
     parser.add_argument(
         "--tensor-parallel-size",
         type=int,
@@ -194,7 +220,8 @@ def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
     prefill_token_budget = args.prefill_token_budget or args.num_pages * page_size
     graph_batch_sizes = getattr(args, "decode_cuda_graph_batch_sizes", None)
     if graph_batch_sizes is None:
-        graph_batch_sizes = (1,) if args.cuda_graph else ()
+        requested = getattr(args, "cuda_graph_batch_sizes", None) or (1,)
+        graph_batch_sizes = tuple(sorted(set(requested))) if args.cuda_graph else ()
     return SchedulerConfig(
         max_running_requests=args.max_running_requests,
         prefill_token_budget=prefill_token_budget,
@@ -204,6 +231,7 @@ def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
         speculative_ngram_max_tokens=args.speculative_ngram_max_tokens,
         speculative_ngram_min_match=args.speculative_ngram_min_match,
         speculative_ngram_max_match=args.speculative_ngram_max_match,
+        speculative_mtp_steps=args.speculative_mtp_steps,
     )
 
 
@@ -259,6 +287,9 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         attention_backend=backend,
         tensor_parallel=tensor_parallel,
         moe_dispatch_backend=args.moe_dispatch,
+        linear_attention_backend=args.linear_attention_backend,
+        enable_mtp=args.speculative_mtp_steps > 0,
+        fp8_weights=not args.dequantize_fp8,
     )
     scheduler_config = _scheduler_config(args, backend)
     if tensor_parallel.enabled:
@@ -300,12 +331,25 @@ async def _generate(
         top_k=args.top_k,
         top_p=args.top_p,
         seed=args.seed,
+        presence_penalty=args.presence_penalty,
     )
+    # thinking 模式下 prompt 已以 <think> 结尾；推理与回答分开显示，只把回答写回历史。
+    parser = ReasoningParser() if args.thinking and service.tokenizer.supports_reasoning else None
     pieces: list[str] = []
-    print("模型> ", end="", flush=True)
+    label = "思考> " if parser is not None else "模型> "
+    print(label, end="", flush=True)
     async for chunk in session:
-        pieces.append(chunk.text)
-        print(chunk.text, end="", flush=True)
+        if parser is None:
+            reasoning, content = "", chunk.text
+        else:
+            reasoning, content = parser.feed(chunk.text, final=chunk.finished)
+        if reasoning:
+            print(reasoning, end="", flush=True)
+        if content:
+            if not pieces and parser is not None:
+                print("\n模型> ", end="", flush=True)
+            pieces.append(content)
+            print(content, end="", flush=True)
     print()
     return "".join(pieces)
 

@@ -19,6 +19,8 @@ class ByteTokenizer:
 
     vocab_size = 256
     eos_token_id = None
+    stop_token_ids: tuple[int, ...] = ()
+    supports_reasoning = False
 
     def encode(self, text: str) -> list[int]:
         if not isinstance(text, str) or not text:
@@ -37,8 +39,10 @@ class ByteTokenizer:
         messages: list[dict[str, str]],
         *,
         enable_thinking: bool = True,
+        tools=None,
+        **template_kwargs,
     ) -> list[int]:
-        del enable_thinking
+        del enable_thinking, tools, template_kwargs
         if not messages:
             raise ValueError("messages must not be empty")
         prompt = " | ".join(f"{message['role']}: {message['content']}" for message in messages)

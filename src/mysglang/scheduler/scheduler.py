@@ -29,15 +29,20 @@ from dataclasses import dataclass
 
 import torch
 
-from mysglang.cache import PagedKVDecodeBuffer, RadixPagedKVCache
+from mysglang.cache import (
+    HybridPagedKVCache,
+    PagedKVCache,
+    PagedKVDecodeBuffer,
+    RadixPagedKVCache,
+)
 from mysglang.core import IncrementalOutput, Request, RequestState
-from mysglang.modeling.cuda_graph import DecodeCudaGraphRunner
+from mysglang.modeling.cuda_graph import DecodeCudaGraphRunner, MtpCudaGraphRunner
 from mysglang.modeling.qwen3 import Qwen3ForCausalLM
 
 from .config import SchedulerConfig
 from .coordination import SchedulerBatchPlan, SchedulerCoordinator
 from .ngram import NGramProposer
-from .sampler import sample_token
+from .sampler import sample_token, sampling_probs, speculative_accept
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,8 @@ class SchedulerStats:
     speculative_verify_forwards: int
     speculative_draft_tokens: int
     speculative_accepted_tokens: int
+    # MTP 头自己的前向次数（递归草稿步 + 每轮之后的追赶步），不计入 model_forwards。
+    speculative_draft_forwards: int = 0
 
 
 @dataclass
@@ -80,6 +87,25 @@ class _Entry:
     enqueue_step: int
     # Prompt 已经 Prefill 到哪里；长 Prompt 会按 budget 分块处理。
     prefill_offset: int = 0
+    # MTP：最近一次追赶前向在最后位置给出的下一轮首个草稿，以及该位置的 MTP hidden。
+    mtp_draft: int | None = None
+    mtp_hidden: torch.Tensor | None = None
+    # 随机采样请求的草稿分布 q；None 表示确定性草稿（greedy argmax 或 n-gram）。
+    mtp_draft_prob: torch.Tensor | None = None
+
+
+@dataclass(frozen=True)
+class _MTPSegment:
+    """Rows of one target forward that the MTP head must now absorb.
+
+    ``tokens`` are the tokens *following* each row (the next prompt token, or the one
+    just sampled/accepted); ``needs_draft`` marks requests that continue decoding.
+    """
+
+    entry: _Entry
+    row_start: int
+    tokens: tuple[int, ...]
+    needs_draft: bool
 
 
 class Scheduler:
@@ -101,18 +127,34 @@ class Scheduler:
                 "Tensor-parallel models require the distributed worker runtime; "
                 "the single-process Scheduler cannot drive collectives safely"
             )
+        self._mtp_steps = config.speculative_mtp_steps
+        if self._mtp_steps and model.mtp is None:
+            raise ValueError("MTP speculative decoding requires a model loaded with enable_mtp")
+        recurrent_spec = model.recurrent_state_spec
         self.model = model.eval()
         self.config = config
         self._coordinator = coordinator
-        parameter = next(model.parameters())
-        self.cache = RadixPagedKVCache.from_config(
-            model.config,
+        parameter = model.embed_tokens.weight
+        cache_arguments = dict(
+            num_layers=model.num_kv_cache_layers,
             num_pages=config.num_pages,
             page_size=config.page_size,
+            num_kv_heads=model.kv_cache_num_heads,
+            head_dim=model.config.head_dim,
             dtype=parameter.dtype,
             device=parameter.device,
-            num_kv_heads=model.kv_cache_num_heads,
         )
+        self.cache: RadixPagedKVCache
+        if recurrent_spec is not None or self._mtp_steps:
+            # 每个运行中的请求占一个 DeltaNet 状态 slot，所以 slot 数等于并发上限。
+            self.cache = HybridPagedKVCache(
+                recurrent=recurrent_spec,
+                num_recurrent_slots=config.max_running_requests,
+                num_draft_layers=model.num_draft_kv_layers if self._mtp_steps else 0,
+                **cache_arguments,
+            )
+        else:
+            self.cache = RadixPagedKVCache(**cache_arguments)
         self.model.validate_cache(self.cache)
         self._device = parameter.device
         self._decode_max_blocks = min(
@@ -126,10 +168,43 @@ class Scheduler:
                 self.cache,
                 config.decode_cuda_graph_batch_sizes,
                 max_blocks=self._decode_max_blocks,
+                return_hidden=bool(self._mtp_steps),
             )
             if config.decode_cuda_graph_batch_sizes
             else None
         )
+        # MTP 每轮 verify 的形状固定为 [batch, 1 + k]，同样可以按精确 batch size 捕获。
+        self._verify_graph_runner = (
+            DecodeCudaGraphRunner(
+                self.model,
+                self.cache,
+                config.decode_cuda_graph_batch_sizes,
+                max_blocks=self._decode_max_blocks,
+                append_length=1 + self._mtp_steps,
+                return_hidden=True,
+            )
+            if config.decode_cuda_graph_batch_sizes and self._mtp_steps
+            else None
+        )
+        # MTP 头自己的两种固定形状：递归草稿步 [batch, 1] 与满宽追赶步 [batch, 1 + k]。
+        self._mtp_draft_graph = None
+        self._mtp_catch_up_graph = None
+        if config.decode_cuda_graph_batch_sizes and self._mtp_steps:
+            draft_cache = self._draft_cache
+            if self._mtp_steps > 1:
+                self._mtp_draft_graph = MtpCudaGraphRunner(
+                    self.model,
+                    draft_cache,
+                    config.decode_cuda_graph_batch_sizes,
+                    max_blocks=self._decode_max_blocks,
+                )
+            self._mtp_catch_up_graph = MtpCudaGraphRunner(
+                self.model,
+                draft_cache,
+                config.decode_cuda_graph_batch_sizes,
+                max_blocks=self._decode_max_blocks,
+                append_length=1 + self._mtp_steps,
+            )
         self._waiting: deque[_Entry] = deque()
         self._prefilling: dict[str, _Entry] = {}
         self._running: dict[str, _Entry] = {}
@@ -153,6 +228,7 @@ class Scheduler:
         self._speculative_verify_forwards = 0
         self._speculative_draft_tokens = 0
         self._speculative_accepted_tokens = 0
+        self._speculative_draft_forwards = 0
         self._closed = False
 
     @property
@@ -165,9 +241,22 @@ class Scheduler:
             return
         if self.has_work:
             raise RuntimeError("cannot close Scheduler while requests are active")
-        if self._cuda_graph_runner is not None:
-            self._cuda_graph_runner.close()
+        for runner in self._graph_runners:
+            runner.close()
         self._closed = True
+
+    @property
+    def _graph_runners(self) -> list[DecodeCudaGraphRunner]:
+        return [
+            runner
+            for runner in (
+                self._cuda_graph_runner,
+                self._verify_graph_runner,
+                self._mtp_draft_graph,
+                self._mtp_catch_up_graph,
+            )
+            if runner is not None
+        ]
 
     @property
     def prefill_input_tokens(self) -> int:
@@ -175,7 +264,9 @@ class Scheduler:
 
     @property
     def stats(self) -> SchedulerStats:
-        graph_stats = self._cuda_graph_runner.stats if self._cuda_graph_runner else None
+        runners = self._graph_runners
+        captures = sum(runner.stats.captures for runner in runners)
+        replays = sum(runner.stats.replays for runner in runners)
         return SchedulerStats(
             active_requests=len(self._entries),
             waiting_requests=len(self._waiting) + len(self._prefilling),
@@ -188,11 +279,12 @@ class Scheduler:
             max_decode_batch_size=self._max_decode_batch_size,
             max_wait_steps=self._max_wait_steps,
             prefill_input_tokens=self._prefill_input_tokens,
-            cuda_graph_captures=graph_stats.captures if graph_stats else 0,
-            cuda_graph_replays=graph_stats.replays if graph_stats else 0,
+            cuda_graph_captures=captures,
+            cuda_graph_replays=replays,
             speculative_verify_forwards=self._speculative_verify_forwards,
             speculative_draft_tokens=self._speculative_draft_tokens,
             speculative_accepted_tokens=self._speculative_accepted_tokens,
+            speculative_draft_forwards=self._speculative_draft_forwards,
         )
 
     def validate(self, request: Request) -> None:
@@ -204,9 +296,12 @@ class Scheduler:
             raise ValueError("prompt plus max_new_tokens exceeds max_position_embeddings")
         if any(token_id >= self.model.config.vocab_size for token_id in request.prompt_token_ids):
             raise ValueError("prompt token IDs must be smaller than model vocab_size")
-        eos_token_id = request.sampling_params.eos_token_id
-        if eos_token_id is not None and eos_token_id >= self.model.config.vocab_size:
-            raise ValueError("eos_token_id must be smaller than model vocab_size")
+        params = request.sampling_params
+        stops = set(params.stop_token_ids)
+        if params.eos_token_id is not None:
+            stops.add(params.eos_token_id)
+        if any(token_id >= self.model.config.vocab_size for token_id in stops):
+            raise ValueError("eos/stop token IDs must be smaller than model vocab_size")
         needed_pages = self.cache.allocator.pages_for_tokens(total_length)
         if needed_pages > self.cache.num_pages:
             raise ValueError("request exceeds total paged KV cache capacity")
@@ -275,6 +370,21 @@ class Scheduler:
             entry.request.state is not RequestState.DECODING for entry in self._running.values()
         ):
             raise RuntimeError("running map contains a request in the wrong state")
+        if self._mtp_steps:
+            draft = self._draft_cache
+            for request_id in self._running:
+                # 两步之间，MTP 草稿层必须恰好追平目标模型，并已备好下一轮首个草稿。
+                if draft.lengths((request_id,)) != self.cache.lengths((request_id,)):
+                    raise RuntimeError("MTP draft K/V is not aligned with the target cache")
+                if self._running[request_id].mtp_draft is None:
+                    raise RuntimeError("running MTP request has no pending draft token")
+
+    @property
+    def _draft_cache(self) -> PagedKVCache:
+        draft = getattr(self.cache, "draft", None)
+        if draft is None:
+            raise RuntimeError("the scheduler cache has no MTP draft layers")
+        return draft
 
     def _can_prefill(self) -> bool:
         if self._prefilling:
@@ -338,12 +448,15 @@ class Scheduler:
             append_lengths=append_lengths,
             logits_indices=tuple(logits_indices),
         )
-        logits = self.model.forward_packed(
-            input_ids,
-            kv_cache=self.cache,
-            cache_request_ids=request_ids,
-            append_lengths=append_lengths,
-            logits_indices=tuple(logits_indices),
+        logits, hidden = self._split_hidden(
+            self.model.forward_packed(
+                input_ids,
+                kv_cache=self.cache,
+                cache_request_ids=request_ids,
+                append_lengths=append_lengths,
+                logits_indices=tuple(logits_indices),
+                return_hidden=bool(self._mtp_steps),
+            )
         )
         self._model_forwards += 1
         input_token_count = sum(append_lengths)
@@ -361,6 +474,33 @@ class Scheduler:
                 for index, entry in enumerate(sampled_entries)
             )
         )
+
+        if self._mtp_steps:
+            # MTP 在同一批位置上追赶：每行配对“该位置之后的 token”（下一个 prompt token
+            # 或刚采样出的 token），保持草稿 K/V 与目标模型逐位置对齐。
+            segments = [
+                _MTPSegment(entry, row, (token,), True)
+                for row, (entry, token) in enumerate(zip(decoding, next_token_ids))
+            ]
+            row = len(decoding)
+            sampled = len(decoding)
+            for entry, start, end in chunks:
+                prompt = entry.request.prompt_token_ids
+                if end == len(prompt):
+                    following = next_token_ids[sampled]
+                    sampled += 1
+                else:
+                    following = prompt[end]
+                segments.append(
+                    _MTPSegment(
+                        entry,
+                        row,
+                        tuple(prompt[start + 1 : end]) + (following,),
+                        end == len(prompt),
+                    )
+                )
+                row += end - start
+            self._mtp_catch_up(segments, hidden)
 
         outputs = []
         for entry, next_token in zip(decoding, next_token_ids[: len(decoding)]):
@@ -427,9 +567,13 @@ class Scheduler:
 
     def _decode_step(self) -> SchedulerStep:
         entries = list(self._running.values())
-        drafts = tuple(self._speculative_draft(entry.request) for entry in entries)
+        if self._mtp_steps:
+            drafts, draft_probs = self._mtp_drafts(entries)
+        else:
+            drafts = tuple(self._ngram_draft(entry.request) for entry in entries)
+            draft_probs = tuple(() for _ in entries)
         if any(drafts):
-            return self._speculative_decode_step(entries, drafts)
+            return self._speculative_decode_step(entries, drafts, draft_probs)
         return self._single_token_decode_step(entries)
 
     def _single_token_decode_step(self, entries: list[_Entry]) -> SchedulerStep:
@@ -438,11 +582,8 @@ class Scheduler:
         for request_id, length in zip(request_ids, lengths):
             self.cache.ensure_capacity(request_id, length + 1)
         input_token_ids = tuple(entry.request.last_output_token_id for entry in entries)
-        graph_eligible = all(entry.request.sampling_params.is_greedy for entry in entries)
-        use_cuda_graph = (
-            graph_eligible
-            and self._cuda_graph_runner
-            and self._cuda_graph_runner.supports(len(entries))
+        use_cuda_graph = bool(
+            self._cuda_graph_runner and self._cuda_graph_runner.supports(len(entries))
         )
         self._validate_batch_plan(
             phase="decode",
@@ -452,9 +593,18 @@ class Scheduler:
             append_lengths=(1,) * len(entries),
             logits_indices=None,
         )
+        hidden = None
         if use_cuda_graph:
             # 满足固定 Decode bucket 条件后，从这里进入 Graph replay。
-            next_token_ids = self._cuda_graph_runner.run(input_token_ids, request_ids)
+            graph_result = self._cuda_graph_runner.run_positions(input_token_ids, request_ids)
+            hidden = graph_result.hidden
+            # 图内已算好 argmax；需要采样或 penalty 的请求改读图输出的 logits。
+            next_token_ids = tuple(
+                tokens[-1]
+                if self._plain_greedy(entry.request)
+                else self._sample(graph_result.logits[index, -1], entry.request)
+                for index, (entry, tokens) in enumerate(zip(entries, graph_result.token_ids))
+            )
         else:
             input_ids = torch.tensor(
                 input_token_ids,
@@ -469,10 +619,13 @@ class Scheduler:
                 )
                 self._decode_buffers[len(entries)] = buffer
             batch = self.cache.prepare_decode_batch(request_ids, buffer)
-            logits = self.model.forward_prepared(
-                input_ids,
-                kv_cache=self.cache,
-                cache_batch=batch,
+            logits, hidden = self._split_hidden(
+                self.model.forward_prepared(
+                    input_ids,
+                    kv_cache=self.cache,
+                    cache_batch=batch,
+                    return_hidden=bool(self._mtp_steps),
+                )
             )
             next_token_ids = tuple(
                 self._sample(logits[index, -1], entry.request)
@@ -481,6 +634,15 @@ class Scheduler:
         next_token_ids = self._sync_token_ids(next_token_ids)
         self._model_forwards += 1
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(entries))
+
+        if self._mtp_steps:
+            self._mtp_catch_up(
+                [
+                    _MTPSegment(entry, row, (token,), True)
+                    for row, (entry, token) in enumerate(zip(entries, next_token_ids))
+                ],
+                hidden,
+            )
 
         outputs = []
         for entry, next_token in zip(entries, next_token_ids):
@@ -502,8 +664,9 @@ class Scheduler:
         self,
         entries: list[_Entry],
         drafts: tuple[tuple[int, ...], ...],
+        draft_probs: tuple[tuple[torch.Tensor | None, ...], ...],
     ) -> SchedulerStep:
-        """Verify ragged n-gram candidate chains with one packed target forward."""
+        """Verify ragged draft chains (n-gram or MTP) with one packed target forward."""
         request_ids = tuple(entry.request.request_id for entry in entries)
         starts = self.cache.lengths(request_ids)
         append_lengths = tuple(1 + len(draft) for draft in drafts)
@@ -515,41 +678,80 @@ class Scheduler:
             packed_tokens.append(entry.request.last_output_token_id)
             packed_tokens.extend(draft)
 
+        use_graph = (
+            self._verify_graph_runner is not None
+            and self._verify_graph_runner.supports(len(entries))
+            and all(length == 1 + self._mtp_steps for length in append_lengths)
+        )
         self._validate_batch_plan(
             phase="decode",
-            execution="ngram-verify",
+            execution=(
+                "mtp-verify-graph"
+                if use_graph
+                else "mtp-verify" if self._mtp_steps else "ngram-verify"
+            ),
             request_ids=request_ids,
             input_token_ids=tuple(packed_tokens),
             append_lengths=append_lengths,
             logits_indices=None,
         )
-        logits = self.model.forward_packed(
-            torch.tensor(packed_tokens, dtype=torch.long, device=self._device),
-            kv_cache=self.cache,
-            cache_request_ids=request_ids,
-            append_lengths=append_lengths,
-            logits_indices=None,
-        )
+        logits = None
+        greedy_rows: tuple[tuple[int, ...], ...] | None = None
+        if use_graph:
+            # 所有请求都是满额 greedy 草稿：[batch, 1 + k] 形状固定，直接 replay。
+            graph_result = self._verify_graph_runner.run_positions(
+                tuple(packed_tokens), request_ids
+            )
+            greedy_rows = graph_result.token_ids
+            hidden = graph_result.hidden
+            state_batch = graph_result.state_batch
+        else:
+            # DeltaNet 状态不能事后截断：verify 只读 slot 并记录每个 token 的输入，
+            # 接受长度确定后再从原状态 replay 被接受的前缀。
+            recurrent = getattr(self.cache, "recurrent", None)
+            state_batch = (
+                None
+                if recurrent is None
+                else recurrent.prepare_batch(request_ids, append_lengths, speculative=True)
+            )
+            logits, hidden = self._split_hidden(
+                self.model.forward_packed(
+                    torch.tensor(packed_tokens, dtype=torch.long, device=self._device),
+                    kv_cache=self.cache,
+                    cache_request_ids=request_ids,
+                    append_lengths=append_lengths,
+                    logits_indices=None,
+                    state_batch=state_batch,
+                    return_hidden=bool(self._mtp_steps),
+                )
+            )
 
         proposed_outputs: list[tuple[int, ...]] = []
         offset = 0
-        for entry, draft, append_length in zip(entries, drafts, append_lengths):
-            request_logits = logits[offset : offset + append_length]
+        for index, (entry, draft, probs, append_length) in enumerate(
+            zip(entries, drafts, draft_probs, append_lengths)
+        ):
+            request = entry.request
+            if greedy_rows is not None and self._plain_greedy(request):
+                # 图内 argmax 已足够：无 penalty 的 greedy 不必再读整行 logits。
+                candidate = self._accept_greedy(draft, greedy_rows[index])
+            else:
+                if greedy_rows is not None:
+                    request_logits = graph_result.logits[index]
+                else:
+                    request_logits = logits[offset : offset + append_length]
+                # A rejection contributes the target correction at that position;
+                # accepting every draft contributes the final bonus token instead.
+                candidate = speculative_accept(
+                    draft,
+                    probs,
+                    request_logits,
+                    request.sampling_params,
+                    request.output_token_ids,
+                    generator=self._generator(request),
+                )
             offset += append_length
-            if not draft:
-                proposed_outputs.append((self._sample(request_logits[0], entry.request),))
-                continue
-
-            target_tokens = request_logits.argmax(dim=-1).tolist()
-            accepted = 0
-            while accepted < len(draft) and target_tokens[accepted] == draft[accepted]:
-                accepted += 1
-            # A rejection contributes the target correction at that position;
-            # accepting every draft contributes the final bonus token instead.
-            candidate_output = draft[:accepted] + (target_tokens[accepted],)
-            proposed_outputs.append(
-                self._truncate_speculative_output(entry.request, candidate_output)
-            )
+            proposed_outputs.append(self._truncate_speculative_output(request, candidate))
 
         emitted = self._sync_speculative_outputs(tuple(proposed_outputs), append_lengths)
         accepted_counts = tuple(
@@ -560,12 +762,38 @@ class Scheduler:
         # the newest emitted token and make rejected candidate slots unreachable.
         for request_id, start, output in zip(request_ids, starts, emitted):
             self.cache.truncate(request_id, start + len(output))
+        if state_batch is not None:
+            # 被吸收的输入恰好是 [last_token] + 已接受草稿，数量等于本轮输出 token 数。
+            absorbed = tuple(len(output) for output in emitted)
+            if use_graph:
+                self._verify_graph_runner.commit_states(state_batch, absorbed)
+            else:
+                self.model.commit_speculative_states(state_batch, absorbed)
 
         self._model_forwards += 1
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(entries))
         self._speculative_verify_forwards += 1
         self._speculative_draft_tokens += sum(map(len, drafts))
         self._speculative_accepted_tokens += sum(accepted_counts)
+
+        if self._mtp_steps:
+            # 草稿步写到了 start 之后；丢弃它们，改用目标 hidden 追赶被接受的位置。
+            draft_cache = self._draft_cache
+            for request_id, start in zip(request_ids, starts):
+                draft_cache.truncate(request_id, start)
+            if (
+                use_graph
+                and self._mtp_catch_up_graph is not None
+                and self._mtp_catch_up_graph.supports(len(entries))
+            ):
+                self._mtp_catch_up_full_width(entries, emitted, starts, hidden)
+            else:
+                segments = []
+                row = 0
+                for entry, output, append_length in zip(entries, emitted, append_lengths):
+                    segments.append(_MTPSegment(entry, row, output, True))
+                    row += append_length
+                self._mtp_catch_up(segments, hidden)
 
         outputs = []
         for entry, token_ids in zip(entries, emitted):
@@ -585,17 +813,230 @@ class Scheduler:
             outputs=tuple(outputs),
         )
 
-    def _speculative_draft(self, request: Request) -> tuple[int, ...]:
-        if self.config.speculative_ngram_max_tokens == 0:
-            return ()
-        if not request.sampling_params.is_greedy:
-            return ()
+    def _draft_budget(self, request: Request, limit: int) -> int:
+        """How many draft tokens this request may verify in one round.
+
+        Greedy requests compare with the (penalized) target argmax; sampled requests use
+        speculative sampling, so both keep exactly their non-speculative distribution.
+        """
+        if limit == 0:
+            return 0
         # A k-token draft may return k accepted tokens plus one bonus token.
-        remaining = request.sampling_params.max_new_tokens - request.num_output_tokens
-        max_tokens = min(self.config.speculative_ngram_max_tokens, remaining - 1)
+        params = request.sampling_params
+        remaining = params.max_new_tokens - request.num_output_tokens
+        return max(0, min(limit, remaining - 1))
+
+    @staticmethod
+    def _plain_greedy(request: Request) -> bool:
+        params = request.sampling_params
+        return params.is_greedy and not params.has_penalties
+
+    def _propose(
+        self,
+        request: Request,
+        logits: torch.Tensor,
+    ) -> tuple[int, torch.Tensor | None]:
+        """One MTP draft token and its distribution q (None for a greedy draft)."""
+        params = request.sampling_params
+        if params.is_greedy:
+            return int(logits.argmax().item()), None
+        # q 不叠加 penalty：投机采样对任意 q 都精确，只影响接受率。
+        probabilities = sampling_probs(logits, params, apply_request_penalties=False)
+        token = int(torch.multinomial(probabilities, 1, generator=self._generator(request)))
+        return token, probabilities
+
+    def _ngram_draft(self, request: Request) -> tuple[int, ...]:
+        max_tokens = self._draft_budget(request, self.config.speculative_ngram_max_tokens)
         if max_tokens <= 0:
             return ()
         return self._ngram_proposer.propose(request.all_token_ids, max_tokens)
+
+    def _mtp_drafts(
+        self,
+        entries: list[_Entry],
+    ) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[torch.Tensor | None, ...], ...]]:
+        """Recursively extend each request's pending MTP draft to its budget.
+
+        Draft ``j + 1`` feeds draft ``j`` and the MTP hidden that produced it back into the
+        MTP head at the next position. The target hidden there is unknown until
+        verification, so the draft chain approximates it with the MTP's own output.
+        """
+        budgets = [self._draft_budget(entry.request, self._mtp_steps) for entry in entries]
+        if not any(budgets):
+            return ((),) * len(entries), ((),) * len(entries)
+        drafts: list[list[int]] = []
+        probs: list[list[torch.Tensor | None]] = []
+        hidden: list[torch.Tensor | None] = []
+        for entry, budget in zip(entries, budgets):
+            if budget and (entry.mtp_draft is None or entry.mtp_hidden is None):
+                raise RuntimeError("MTP request has no pending draft to extend")
+            drafts.append([entry.mtp_draft] if budget else [])
+            probs.append([entry.mtp_draft_prob] if budget else [])
+            hidden.append(entry.mtp_hidden if budget else None)
+        request_ids = [entry.request.request_id for entry in entries]
+        for request_id, start, budget in zip(
+            request_ids, self.cache.lengths(tuple(request_ids)), budgets
+        ):
+            # 草稿步与随后的 verify 共享页；一次保证到 verify 需要的最远位置。
+            self.cache.ensure_capacity(request_id, start + 1 + budget)
+
+        draft_cache = self._draft_cache
+        for depth in range(1, max(budgets)):
+            active = [index for index, budget in enumerate(budgets) if budget > depth]
+            active_ids = tuple(request_ids[index] for index in active)
+            tokens = tuple(drafts[index][-1] for index in active)
+            self._validate_batch_plan(
+                phase="decode",
+                execution="mtp-draft",
+                request_ids=active_ids,
+                input_token_ids=tokens,
+                append_lengths=(1,) * len(active),
+                logits_indices=None,
+                cache=draft_cache,
+            )
+            step_hidden = torch.stack([hidden[index] for index in active]).unsqueeze(1)
+            if (
+                self._mtp_draft_graph is not None
+                and len(active) == len(entries)
+                and self._mtp_draft_graph.supports(len(active))
+            ):
+                result = self._mtp_draft_graph.run_positions(tokens, active_ids, step_hidden)
+                step_logits = result.logits[:, -1]
+                draft_hidden = result.hidden
+            else:
+                batch = draft_cache.prepare_batch(active_ids, (1,) * len(active))
+                logits, draft_hidden = self.model.forward_mtp(
+                    torch.tensor(tokens, dtype=torch.long, device=self._device).view(-1, 1),
+                    step_hidden,
+                    kv_cache=draft_cache,
+                    cache_batch=batch,
+                )
+                step_logits = logits[:, -1]
+            self._speculative_draft_forwards += 1
+            proposals = [
+                self._propose(entries[index].request, step_logits[row])
+                for row, index in enumerate(active)
+            ]
+            proposed = self._sync_token_ids(tuple(token for token, _ in proposals))
+            for row, (index, token) in enumerate(zip(active, proposed)):
+                drafts[index].append(token)
+                probs[index].append(proposals[row][1])
+                hidden[index] = draft_hidden[row, -1]
+        return tuple(tuple(draft) for draft in drafts), tuple(tuple(q) for q in probs)
+
+    def _mtp_catch_up(
+        self,
+        segments: list[_MTPSegment],
+        target_hidden: torch.Tensor | None,
+    ) -> None:
+        """Run the MTP head over rows the target just processed; store the next drafts."""
+        if not segments:
+            return
+        if target_hidden is None:
+            raise RuntimeError("MTP catch-up requires the target hidden states")
+        flat_hidden = target_hidden.reshape(-1, target_hidden.size(-1))
+        request_ids = tuple(segment.entry.request.request_id for segment in segments)
+        append_lengths = tuple(len(segment.tokens) for segment in segments)
+        tokens = tuple(token for segment in segments for token in segment.tokens)
+        rows = [
+            row
+            for segment in segments
+            for row in range(segment.row_start, segment.row_start + len(segment.tokens))
+        ]
+        logits_indices: list[int] = []
+        offset = 0
+        for segment in segments:
+            offset += len(segment.tokens)
+            if segment.needs_draft:
+                logits_indices.append(offset - 1)
+        draft_cache = self._draft_cache
+        self._validate_batch_plan(
+            phase="decode",
+            execution="mtp-catch-up",
+            request_ids=request_ids,
+            input_token_ids=tokens,
+            append_lengths=append_lengths,
+            logits_indices=tuple(logits_indices),
+            cache=draft_cache,
+        )
+        batch = draft_cache.prepare_batch(request_ids, append_lengths)
+        logits, mtp_hidden = self.model.forward_mtp(
+            torch.tensor(tokens, dtype=torch.long, device=self._device),
+            flat_hidden.index_select(0, torch.tensor(rows, device=flat_hidden.device)),
+            kv_cache=draft_cache,
+            cache_batch=batch,
+            logits_indices=tuple(logits_indices),
+        )
+        self._speculative_draft_forwards += 1
+        drafting = [segment for segment in segments if segment.needs_draft]
+        proposals = [
+            self._propose(segment.entry.request, logits[index])
+            for index, segment in enumerate(drafting)
+        ]
+        next_drafts = self._sync_token_ids(tuple(token for token, _ in proposals))
+        for segment, token, (_, q), row in zip(drafting, next_drafts, proposals, logits_indices):
+            segment.entry.mtp_draft = token
+            segment.entry.mtp_draft_prob = q
+            segment.entry.mtp_hidden = mtp_hidden[row]
+
+    def _mtp_catch_up_full_width(
+        self,
+        entries: list[_Entry],
+        emitted: tuple[tuple[int, ...], ...],
+        starts: tuple[int, ...],
+        target_hidden: torch.Tensor,
+    ) -> None:
+        """Graph catch-up over every verified row, then drop rows past acceptance.
+
+        Rows after a request's accepted prefix see arbitrary padding tokens, but causal
+        attention keeps them from affecting earlier rows and the truncation below makes
+        their draft K/V unreachable, exactly like rejected target K/V.
+        """
+        width = 1 + self._mtp_steps
+        request_ids = tuple(entry.request.request_id for entry in entries)
+        tokens = tuple(
+            token
+            for output in emitted
+            for token in output + (output[-1],) * (width - len(output))
+        )
+        self._validate_batch_plan(
+            phase="decode",
+            execution="mtp-catch-up-graph",
+            request_ids=request_ids,
+            input_token_ids=tokens,
+            append_lengths=(width,) * len(entries),
+            logits_indices=None,
+            cache=self._draft_cache,
+        )
+        result = self._mtp_catch_up_graph.run_positions(tokens, request_ids, target_hidden)
+        self._speculative_draft_forwards += 1
+        proposals = [
+            (row[len(output) - 1], None)
+            if entry.request.sampling_params.is_greedy
+            else self._propose(entry.request, result.logits[index, len(output) - 1])
+            for index, (entry, row, output) in enumerate(zip(entries, result.token_ids, emitted))
+        ]
+        drafts = self._sync_token_ids(tuple(token for token, _ in proposals))
+        for index, (entry, output, start, token) in enumerate(
+            zip(entries, emitted, starts, drafts)
+        ):
+            self._draft_cache.truncate(entry.request.request_id, start + len(output))
+            entry.mtp_draft = token
+            entry.mtp_draft_prob = proposals[index][1]
+            entry.mtp_hidden = result.hidden[index, len(output) - 1].clone()
+
+    @staticmethod
+    def _accept_greedy(draft: tuple[int, ...], target_tokens: tuple[int, ...]) -> tuple[int, ...]:
+        accepted = 0
+        while accepted < len(draft) and target_tokens[accepted] == draft[accepted]:
+            accepted += 1
+        return draft[:accepted] + (target_tokens[accepted],)
+
+    @staticmethod
+    def _split_hidden(result) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if isinstance(result, tuple):
+            return result
+        return result, None
 
     @staticmethod
     def _accepted_prefix_length(output: tuple[int, ...], draft: tuple[int, ...]) -> int:
@@ -614,14 +1055,10 @@ class Scheduler:
         """Stop a multi-token result at the same boundary as repeated record_token calls."""
         remaining = request.sampling_params.max_new_tokens - request.num_output_tokens
         result = output[:remaining]
-        params = request.sampling_params
-        if params.eos_token_id is not None and not params.ignore_eos:
-            try:
-                eos_index = result.index(params.eos_token_id)
-            except ValueError:
-                pass
-            else:
-                result = result[: eos_index + 1]
+        stops = request.sampling_params.all_stop_token_ids
+        for index, token_id in enumerate(result):
+            if token_id in stops:
+                return result[: index + 1]
         return result
 
     def _sync_speculative_outputs(
@@ -652,6 +1089,9 @@ class Scheduler:
     def _release(self, entry: _Entry, *, finished: bool) -> None:
         request = entry.request
         request_id = request.request_id
+        entry.mtp_draft = None
+        entry.mtp_hidden = None
+        entry.mtp_draft_prob = None
         if request_id in self.cache.allocator.request_ids:
             if finished:
                 self.cache.finish_request(request_id, request.all_token_ids)
@@ -668,19 +1108,27 @@ class Scheduler:
     def _max_request_tokens(request: Request) -> int:
         return len(request.prompt_token_ids) + request.sampling_params.max_new_tokens
 
-    def _sample(self, logits: torch.Tensor, request: Request) -> int:
+    def _generator(self, request: Request) -> torch.Generator | None:
         params = request.sampling_params
-        generator = None
-        if not params.is_greedy:
-            generator = self._sampling_generators.get(request.request_id)
-            if generator is None:
-                generator = torch.Generator(device=self._device)
-                if params.seed is None:
-                    generator.seed()
-                else:
-                    generator.manual_seed(params.seed)
-                self._sampling_generators[request.request_id] = generator
-        return sample_token(logits, params, generator=generator)
+        if params.is_greedy:
+            return None
+        generator = self._sampling_generators.get(request.request_id)
+        if generator is None:
+            generator = torch.Generator(device=self._device)
+            if params.seed is None:
+                generator.seed()
+            else:
+                generator.manual_seed(params.seed)
+            self._sampling_generators[request.request_id] = generator
+        return generator
+
+    def _sample(self, logits: torch.Tensor, request: Request) -> int:
+        return sample_token(
+            logits,
+            request.sampling_params,
+            generator=self._generator(request),
+            output_token_ids=request.output_token_ids,
+        )
 
     def _validate_batch_plan(
         self,
@@ -691,9 +1139,11 @@ class Scheduler:
         input_token_ids: tuple[int, ...],
         append_lengths: tuple[int, ...],
         logits_indices: tuple[int, ...] | None,
+        cache: PagedKVCache | None = None,
     ) -> None:
         if self._coordinator is None:
             return
+        cache = self.cache if cache is None else cache
         plan = SchedulerBatchPlan(
             phase=phase,
             execution=execution,
@@ -701,9 +1151,9 @@ class Scheduler:
             input_token_ids=input_token_ids,
             append_lengths=append_lengths,
             logits_indices=logits_indices,
-            starts=self.cache.lengths(request_ids),
+            starts=cache.lengths(request_ids),
             page_tables=tuple(
-                self.cache.allocator.page_table(request_id) for request_id in request_ids
+                cache.allocator.page_table(request_id) for request_id in request_ids
             ),
         )
         self._coordinator.validate_batch(plan)

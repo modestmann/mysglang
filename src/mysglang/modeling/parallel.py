@@ -8,6 +8,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
+from mysglang.config import Fp8QuantConfig
+
+from .fp8 import FP8_DTYPE, ceil_div, fp8_linear, quantize_block_fp8
+
 
 @dataclass(frozen=True)
 class TensorParallelContext:
@@ -136,13 +140,25 @@ class ColumnParallelLinear(nn.Module):
     Independent segments matter for fused Q/K/V and gate/up weights: every rank
     stores ``[Q_rank, K_rank, V_rank]`` rather than one arbitrary contiguous slice
     of the globally fused tensor.
+
+    ``shard_counts`` lets a segment be split into fewer shards than TP ranks. With
+    2 KV heads and TP=4, K/V use two shards: ranks 0/1 replicate KV head 0 and ranks
+    2/3 replicate KV head 1, matching the GQA groups of their local query heads.
+
+    With ``quant`` the weight is stored as block FP8 plus one float32 dequantization
+    scale per ``[block_n, block_k]`` tile, sliced along the same segment boundaries.
     """
+
+    keep_dtype_parameters: tuple[str, ...] = ()
 
     def __init__(
         self,
         in_features: int,
         output_sizes: tuple[int, ...],
         tensor_parallel: TensorParallelContext,
+        *,
+        shard_counts: tuple[int, ...] | None = None,
+        quant: Fp8QuantConfig | None = None,
     ) -> None:
         super().__init__()
         if not output_sizes or any(size <= 0 for size in output_sizes):
@@ -150,38 +166,91 @@ class ColumnParallelLinear(nn.Module):
         self.in_features = in_features
         self.global_output_sizes = output_sizes
         self.tensor_parallel = tensor_parallel
+        world_size = tensor_parallel.world_size
+        if shard_counts is None:
+            shard_counts = (world_size,) * len(output_sizes)
+        if len(shard_counts) != len(output_sizes):
+            raise ValueError("shard_counts must contain one value per output segment")
+        for count, size in zip(shard_counts, output_sizes):
+            if count <= 0 or world_size % count:
+                raise ValueError("segment shard count must divide the TP world size")
+            if size % count:
+                raise ValueError(
+                    f"column-parallel output size={size} must be divisible by {count} shards"
+                )
+        self.shard_counts = tuple(shard_counts)
         self.local_output_sizes = tuple(
-            tensor_parallel.local_size(size, "column-parallel output size")
-            for size in output_sizes
+            size // count for size, count in zip(output_sizes, self.shard_counts)
         )
-        self.weight = nn.Parameter(torch.empty(sum(self.local_output_sizes), in_features))
+        self.quant = quant
+        out_features = sum(self.local_output_sizes)
+        if quant is None:
+            self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        else:
+            block_n, block_k = quant.weight_block_size
+            if len(output_sizes) > 1 or tensor_parallel.enabled:
+                # 融合或切分后的每段必须从 scale tile 边界开始，否则一个 tile 会跨两段。
+                if any(size % block_n for size in self.local_output_sizes):
+                    raise ValueError(
+                        "FP8 column-parallel segments must be multiples of the "
+                        f"{block_n}-row weight block: {self.local_output_sizes}"
+                    )
+            self.keep_dtype_parameters = ("weight", "weight_scale_inv")
+            self.weight = nn.Parameter(
+                torch.empty(out_features, in_features, dtype=FP8_DTYPE),
+                requires_grad=False,
+            )
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(
+                    ceil_div(out_features, block_n),
+                    ceil_div(in_features, block_k),
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.weight, a=sqrt(5))
+        if self.quant is None:
+            nn.init.kaiming_uniform_(self.weight, a=sqrt(5))
+            return
+        full = torch.empty(self.weight.shape, device=self.weight.device)
+        nn.init.kaiming_uniform_(full, a=sqrt(5))
+        weight, scale = quantize_block_fp8(full, self.quant.weight_block_size)
+        with torch.no_grad():
+            self.weight.copy_(weight)
+            self.weight_scale_inv.copy_(scale)
 
     def local_segment(self, index: int) -> slice:
         start = sum(self.local_output_sizes[:index])
         return slice(start, start + self.local_output_sizes[index])
 
     def source_segment(self, index: int) -> slice:
-        return self.tensor_parallel.shard(
-            self.global_output_sizes[index],
-            "column-parallel output size",
-        )
+        """Rows of the global (unfused) segment ``index`` owned by this rank."""
+        count = self.shard_counts[index]
+        local_size = self.local_output_sizes[index]
+        shard_index = self.tensor_parallel.rank // (self.tensor_parallel.world_size // count)
+        start = shard_index * local_size
+        return slice(start, start + local_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight)
+        if self.quant is None:
+            return F.linear(x, self.weight)
+        return fp8_linear(x, self.weight, self.weight_scale_inv, self.quant.weight_block_size)
 
 
 class RowParallelLinear(nn.Module):
     """Consume a rank-local input shard and sum partial outputs across ranks."""
+
+    keep_dtype_parameters: tuple[str, ...] = ()
 
     def __init__(
         self,
         in_features: int,
         out_features: int,
         tensor_parallel: TensorParallelContext,
+        *,
+        quant: Fp8QuantConfig | None = None,
     ) -> None:
         super().__init__()
         self.global_in_features = in_features
@@ -191,11 +260,41 @@ class RowParallelLinear(nn.Module):
         )
         self.out_features = out_features
         self.tensor_parallel = tensor_parallel
-        self.weight = nn.Parameter(torch.empty(out_features, self.local_in_features))
+        self.quant = quant
+        if quant is None:
+            self.weight = nn.Parameter(torch.empty(out_features, self.local_in_features))
+        else:
+            block_n, block_k = quant.weight_block_size
+            if tensor_parallel.enabled and self.local_in_features % block_k:
+                raise ValueError(
+                    "FP8 row-parallel input shards must be multiples of the "
+                    f"{block_k}-column weight block: {self.local_in_features}"
+                )
+            self.keep_dtype_parameters = ("weight", "weight_scale_inv")
+            self.weight = nn.Parameter(
+                torch.empty(out_features, self.local_in_features, dtype=FP8_DTYPE),
+                requires_grad=False,
+            )
+            self.weight_scale_inv = nn.Parameter(
+                torch.empty(
+                    ceil_div(out_features, block_n),
+                    ceil_div(self.local_in_features, block_k),
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.kaiming_uniform_(self.weight, a=sqrt(5))
+        if self.quant is None:
+            nn.init.kaiming_uniform_(self.weight, a=sqrt(5))
+            return
+        full = torch.empty(self.weight.shape, device=self.weight.device)
+        nn.init.kaiming_uniform_(full, a=sqrt(5))
+        weight, scale = quantize_block_fp8(full, self.quant.weight_block_size)
+        with torch.no_grad():
+            self.weight.copy_(weight)
+            self.weight_scale_inv.copy_(scale)
 
     @property
     def source_columns(self) -> slice:
@@ -210,7 +309,16 @@ class RowParallelLinear(nn.Module):
                 "row-parallel input has the wrong local width: "
                 f"{x.size(-1)} != {self.local_in_features}"
             )
-        return self.tensor_parallel.all_reduce(F.linear(x, self.weight))
+        if self.quant is None:
+            output = F.linear(x, self.weight)
+        else:
+            output = fp8_linear(
+                x,
+                self.weight,
+                self.weight_scale_inv,
+                self.quant.weight_block_size,
+            )
+        return self.tensor_parallel.all_reduce(output)
 ##每一个 Dense Decoder Layer 有两次 all_reduce  attention+MLP
 """
 模块                                使用的并行 Linear

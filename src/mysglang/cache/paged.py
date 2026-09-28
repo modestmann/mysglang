@@ -88,6 +88,8 @@ class PagedKVDecodeBuffer:
     positions: torch.Tensor
     slot_mapping: torch.Tensor
     _owner_token: object = field(repr=False, compare=False)
+    # 每个请求本轮追加的 token 数：普通 Decode 为 1，投机 verify 为 1 + 草稿长度。
+    append_length: int = 1
 
     @property
     def batch_size(self) -> int:
@@ -329,6 +331,7 @@ class PagedKVCache:
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        allocator: PageAllocator | None = None,
     ) -> None:
         dimensions = {
             "num_layers": num_layers,
@@ -342,7 +345,11 @@ class PagedKVCache:
         shape = (num_layers, num_pages, page_size, num_kv_heads, head_dim)
         self._keys = torch.empty(shape, dtype=dtype, device=device)
         self._values = torch.empty_like(self._keys)
-        self.allocator = PageAllocator(num_pages=num_pages, page_size=page_size)
+        if allocator is None:
+            allocator = PageAllocator(num_pages=num_pages, page_size=page_size)
+        elif (allocator.num_pages, allocator.page_size) != (num_pages, page_size):
+            raise ValueError("a shared page allocator must match the cache page layout")
+        self.allocator = allocator
         self._lengths: dict[str, list[int]] = {}
         self._batch_owner_token = object()
         # 全局物理KV池
@@ -363,9 +370,11 @@ class PagedKVCache:
         dtype: torch.dtype,
         device: torch.device | str,
         num_kv_heads: int | None = None,
+        num_layers: int | None = None,
     ) -> PagedKVCache:
+        # 只有 full-attention 层有逐 token K/V；DeltaNet 层的状态在 RecurrentStatePool。
         return cls(
-            num_layers=config.num_layers,
+            num_layers=len(config.full_attention_layers) if num_layers is None else num_layers,
             num_pages=num_pages,
             page_size=page_size,
             num_kv_heads=(
@@ -484,10 +493,13 @@ class PagedKVCache:
         batch_size: int,
         *,
         max_blocks: int,
+        append_length: int = 1,
     ) -> PagedKVDecodeBuffer:
-        """Allocate stable Decode metadata addresses for one exact batch size."""
+        """Allocate stable Decode metadata addresses for one exact batch shape."""
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
+        if append_length <= 0:
+            raise ValueError("append_length must be positive")
         if not isinstance(max_blocks, int) or isinstance(max_blocks, bool) or max_blocks <= 0:
             raise ValueError("max_blocks must be a positive integer")
         if max_blocks > self.num_pages:
@@ -502,14 +514,19 @@ class PagedKVCache:
             ),
             cache_seqlens=torch.empty(batch_size, dtype=torch.int32, device=device),
             cu_seqlens_q=torch.arange(
-                batch_size + 1,
+                0,
+                (batch_size + 1) * append_length,
+                append_length,
                 dtype=torch.int32,
                 device=device,
             ),
             cu_seqlens_k=torch.empty(batch_size + 1, dtype=torch.int32, device=device),
-            positions=torch.empty(batch_size, dtype=torch.long, device=device),
-            slot_mapping=torch.empty(batch_size, dtype=torch.long, device=device),
+            positions=torch.empty(batch_size * append_length, dtype=torch.long, device=device),
+            slot_mapping=torch.empty(
+                batch_size * append_length, dtype=torch.long, device=device
+            ),
             _owner_token=self._batch_owner_token,
+            append_length=append_length,
         )
 
     def prepare_decode_batch(
@@ -529,10 +546,12 @@ class PagedKVCache:
             raise ValueError("request_ids must be unique within a batch")
 
         starts = self.lengths(requests)
-        ends = tuple(start + 1 for start in starts)
+        append_length = buffer.append_length
+        ends = tuple(start + append_length for start in starts)
         tables = tuple(self.allocator.page_table(request_id) for request_id in requests)
         buffer.block_table.fill_(-1)
         slots = []
+        positions: list[int] = []
         cumulative_k = [0]
         for batch_index, (request_id, start, end, table) in enumerate(
             zip(requests, starts, ends, tables)
@@ -550,17 +569,22 @@ class PagedKVCache:
             buffer.block_table[batch_index, : len(table)].copy_(
                 torch.tensor(table, dtype=torch.int32)
             )
-            slots.append(table[start // self.page_size] * self.page_size + start % self.page_size)
+            for position in range(start, end):
+                positions.append(position)
+                slots.append(
+                    table[position // self.page_size] * self.page_size
+                    + position % self.page_size
+                )
             cumulative_k.append(cumulative_k[-1] + end)
 
         buffer.cache_seqlens.copy_(torch.tensor(starts, dtype=torch.int32))
-        buffer.positions.copy_(torch.tensor(starts, dtype=torch.long))
+        buffer.positions.copy_(torch.tensor(positions, dtype=torch.long))
         buffer.slot_mapping.copy_(torch.tensor(slots, dtype=torch.long))
         buffer.cu_seqlens_k.copy_(torch.tensor(cumulative_k, dtype=torch.int32))
         return PagedKVBatch(
             request_ids=requests,
             starts=starts,
-            append_lengths=(1,) * len(requests),
+            append_lengths=(append_length,) * len(requests),
             ends=ends,
             block_table=buffer.block_table,
             cache_seqlens=buffer.cache_seqlens,
@@ -854,3 +878,44 @@ class PagedKVCache:
         if batch._owner_token is not self._batch_owner_token:
             raise ValueError("paged KV batch belongs to a different cache")
         self._validate_requests(batch.request_ids)
+
+
+class PagedKVCompanion(PagedKVCache):
+    """Extra K/V layers that reuse another cache's page tables but own their lengths.
+
+    The MTP draft layer writes K/V at the same token positions as the target model, so
+    it can live in the target's physical pages. Its logical length is tracked separately
+    because draft steps run ahead of the target and are rolled back after verification.
+    Page reservation and release stay with the owning cache.
+    """
+
+    def __init__(self, *, allocator: PageAllocator, **kwargs) -> None:
+        super().__init__(allocator=allocator, **kwargs)
+
+    def reserve_request(self, *args, **kwargs) -> bool:
+        raise RuntimeError("companion K/V layers attach to requests reserved by their owner")
+
+    def attach_request(self, request_id: str, initial_length: int = 0) -> None:
+        if request_id in self._lengths:
+            raise ValueError(f"companion cache already tracks request: {request_id}")
+        if request_id not in self.allocator.request_ids:
+            raise KeyError(f"owner cache has not reserved request: {request_id}")
+        self._lengths[request_id] = [initial_length] * self.num_layers
+
+    def detach_request(self, request_id: str) -> None:
+        self._validate_request(request_id)
+        self._lengths.pop(request_id)
+
+    def release_request(self, request_id: str) -> tuple[int, ...]:
+        self.detach_request(request_id)
+        return ()
+
+    def check_integrity(self) -> None:
+        if set(self._lengths) != set(self.allocator.request_ids):
+            raise RuntimeError("companion cache requests disagree with the owner allocator")
+        for request_id, layer_lengths in self._lengths.items():
+            if len(layer_lengths) != self.num_layers:
+                raise RuntimeError("companion request has the wrong number of layer lengths")
+            allocated_tokens = len(self.allocator.page_table(request_id)) * self.page_size
+            if any(not 0 <= length <= allocated_tokens for length in layer_lengths):
+                raise RuntimeError("companion length exceeds allocated physical pages")

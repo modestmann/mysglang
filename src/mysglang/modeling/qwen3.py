@@ -1,41 +1,66 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mysglang.cache import PagedKVBatch, PagedKVCache
-from mysglang.config import ModelConfig
+from mysglang.cache import (
+    PagedKVBatch,
+    PagedKVCache,
+    RecurrentStateBatch,
+    RecurrentStateSpec,
+)
+from mysglang.config import LINEAR_ATTENTION, Fp8QuantConfig, ModelConfig
 
 from .attention import AttentionBackend, TorchAttentionBackend
+from .deltanet import Qwen3_5GatedDeltaNet
+from .fp8 import FP8_DTYPE, ceil_div, dequantize_block_fp8, quantize_block_fp8
 from .parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelContext
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, hidden_size: int, eps: float) -> None:
+    """Qwen3 scales the normalized value by ``w``; Qwen3.5 stores ``w - 1`` instead.
+
+    Qwen3.5 checkpoints use a zero-centered weight (initialized to zero) and multiply by
+    ``1 + w`` in float32 before casting back, exactly as the Hugging Face reference.
+    """
+
+    def __init__(self, hidden_size: int, eps: float, *, zero_centered: bool = False) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.zero_centered = zero_centered
+        self.weight = nn.Parameter(
+            torch.zeros(hidden_size) if zero_centered else torch.ones(hidden_size)
+        )
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         normalized = x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)
+        if self.zero_centered:
+            return (normalized * (1.0 + self.weight.float())).to(x.dtype)
         return self.weight * normalized.to(x.dtype)
 
 
 class RotaryEmbedding(nn.Module):
-    """Qwen3's default RoPE, computed only for positions used by this forward."""
+    """Default RoPE on the first ``rotary_dim`` channels of each head.
 
-    def __init__(self, head_dim: int, theta: float) -> None:
+    Qwen3 rotates the whole head. Qwen3.5 rotates only 25% of it (64 of 256 channels)
+    and leaves the rest position-free. Its interleaved M-RoPE uses the same position for
+    the temporal/height/width sections of text tokens, which reduces to this 1-D RoPE.
+    """
+
+    def __init__(self, head_dim: int, theta: float, rotary_dim: int | None = None) -> None:
         super().__init__()
         self.head_dim = head_dim
+        self.rotary_dim = head_dim if rotary_dim is None else rotary_dim
         self.theta = theta
         self.register_buffer("inv_freq", self._make_inv_freq(), persistent=False)
 
     def _make_inv_freq(self, device: torch.device | str | None = None) -> torch.Tensor:
-        indices = torch.arange(0, self.head_dim, 2, dtype=torch.float32, device=device)
-        return 1.0 / self.theta ** (indices / self.head_dim)
+        indices = torch.arange(0, self.rotary_dim, 2, dtype=torch.float32, device=device)
+        return 1.0 / self.theta ** (indices / self.rotary_dim)
 
     def reset_buffer(self, device: torch.device | str) -> None:
         # ``to_empty`` intentionally leaves buffers uninitialized; weights come from the
@@ -63,13 +88,22 @@ class RotaryEmbedding(nn.Module):
             sin = sin_values[:, None, :, :]
         else:
             raise ValueError("positions shape does not match dense or packed Q/K")
-        return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
+        if self.rotary_dim == self.head_dim:
+            return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
+        dim = self.rotary_dim
+        return (
+            torch.cat((_apply_rope(query[..., :dim], cos, sin), query[..., dim:]), dim=-1),
+            torch.cat((_apply_rope(key[..., :dim], cos, sin), key[..., dim:]), dim=-1),
+        )
 
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     half = x.shape[-1] // 2
     rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
     return x * cos + rotated * sin
+
+
+QuantizeFn = Callable[..., "Fp8QuantConfig | None"]
 
 
 class Qwen3Attention(nn.Module):
@@ -79,40 +113,57 @@ class Qwen3Attention(nn.Module):
         layer_idx: int,
         backend: AttentionBackend,
         tensor_parallel: TensorParallelContext,
+        *,
+        kv_layer_idx: int | None = None,
+        module_prefix: str | None = None,
+        quantize: QuantizeFn | None = None,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
+        # Paged K/V 只为 full-attention 层分配，因此 cache 层号不一定等于模型层号。
+        self.kv_layer_idx = layer_idx if kv_layer_idx is None else kv_layer_idx
         self.backend = backend
         self.tensor_parallel = tensor_parallel
         self.num_heads = tensor_parallel.local_size(
             config.num_attention_heads,
             "num_attention_heads",
         )
-        self.num_kv_heads = tensor_parallel.local_size(
-            config.num_key_value_heads,
-            "num_key_value_heads",
-        )
+        # KV 头少于 TP rank 时按 GQA 分组复制：例如 2 个 KV 头、TP=4，rank 0/1 共用头 0。
+        self.kv_shards = kv_shard_count(config, tensor_parallel)
+        self.num_kv_heads = config.num_key_value_heads // self.kv_shards
         assert config.head_dim is not None
         self.head_dim = config.head_dim
-        self.global_q_size = config.num_attention_heads * self.head_dim
+        # Qwen3.5 的 q_proj 每个头输出 [query, gate] 两段，gate 过 sigmoid 后乘到注意力输出上。
+        self.output_gate = config.attn_output_gate
+        q_width = self.head_dim * (2 if self.output_gate else 1)
+        self.global_q_size = config.num_attention_heads * q_width
         self.global_kv_size = config.num_key_value_heads * self.head_dim
-        self.q_size = self.num_heads * self.head_dim
+        self.q_size = self.num_heads * q_width
         self.kv_size = self.num_kv_heads * self.head_dim
+        prefix = module_prefix or f"layers.{layer_idx}.self_attn"
         # Hugging Face stores Q/K/V separately. The loader independently takes this
         # rank's heads from each tensor, then packs them as [Q_rank, K_rank, V_rank].
         self.qkv_proj = ColumnParallelLinear(
             config.hidden_size,
             (self.global_q_size, self.global_kv_size, self.global_kv_size),
             tensor_parallel,
+            shard_counts=(tensor_parallel.world_size, self.kv_shards, self.kv_shards),
+            quant=(
+                quantize(f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj")
+                if quantize
+                else None
+            ),
         )
         self.o_proj = RowParallelLinear(
-            self.global_q_size,
+            config.num_attention_heads * self.head_dim,
             config.hidden_size,
             tensor_parallel,
+            quant=quantize(f"{prefix}.o_proj") if quantize else None,
         )
-        self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
-        self.rope = RotaryEmbedding(self.head_dim, config.rope_theta)
+        zero_centered = config.is_qwen3_5
+        self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps, zero_centered=zero_centered)
+        self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps, zero_centered=zero_centered)
+        self.rope = RotaryEmbedding(self.head_dim, config.rope_theta, config.rotary_dim)
 
     def forward(
         self,
@@ -121,42 +172,53 @@ class Qwen3Attention(nn.Module):
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
     ) -> torch.Tensor:
-        if x.ndim == 3:
-            batch_size, seq_len, _ = x.shape
-
-            def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
-                return tensor.view(batch_size, seq_len, heads, self.head_dim).transpose(1, 2)
-
-        elif x.ndim == 2:
-            total_tokens = x.size(0)
-
-            def split_heads(tensor: torch.Tensor, heads: int) -> torch.Tensor:
-                return tensor.view(total_tokens, heads, self.head_dim)
-
-        else:
+        if x.ndim not in {2, 3}:
             raise ValueError("hidden states must be dense rank 3 or packed rank 2")
-
+        leading = x.shape[:-1]
         query, key, value = self.qkv_proj(x).split(
             (self.q_size, self.kv_size, self.kv_size),
             dim=-1,
         )
-        query = self.q_norm(split_heads(query, self.num_heads))
-        key = self.k_norm(split_heads(key, self.num_kv_heads))
-        value = split_heads(value, self.num_kv_heads)
+        gate = None
+        if self.output_gate:
+            query, gate = query.view(*leading, self.num_heads, 2 * self.head_dim).chunk(2, dim=-1)
+            gate = gate.reshape(*leading, self.num_heads * self.head_dim)
+        query = self.q_norm(query.reshape(*leading, self.num_heads, self.head_dim))
+        key = self.k_norm(key.reshape(*leading, self.num_kv_heads, self.head_dim))
+        value = value.reshape(*leading, self.num_kv_heads, self.head_dim)
+        if x.ndim == 3:
+            # Dense attention uses [batch, heads, sequence, head_dim].
+            query, key, value = (tensor.transpose(1, 2) for tensor in (query, key, value))
         query, key = self.rope(query, key, positions)
         output = self.backend.forward(
             query,
             key,
             value,
-            layer_idx=self.layer_idx,
+            layer_idx=self.kv_layer_idx,
             kv_cache=kv_cache,
             cache_batch=cache_batch,
         )
         if output.ndim == 4:
-            output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+            output = output.transpose(1, 2).contiguous().view(*leading, -1)
         else:
             output = output.reshape(output.size(0), -1)
+        if gate is not None:
+            output = output * torch.sigmoid(gate)
         return self.o_proj(output)
+
+
+def kv_shard_count(config: ModelConfig, tensor_parallel: TensorParallelContext) -> int:
+    """Distinct K/V head shards; below TP size each shard is replicated on several ranks."""
+    world_size = tensor_parallel.world_size
+    if config.num_key_value_heads >= world_size:
+        tensor_parallel.local_size(config.num_key_value_heads, "num_key_value_heads")
+        return world_size
+    if world_size % config.num_key_value_heads:
+        raise ValueError(
+            f"TP={world_size} must be a multiple of num_key_value_heads="
+            f"{config.num_key_value_heads} to replicate K/V heads"
+        )
+    return config.num_key_value_heads
 
 
 class Qwen3MLP(nn.Module):
@@ -165,6 +227,9 @@ class Qwen3MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         tensor_parallel: TensorParallelContext,
+        *,
+        module_prefix: str = "",
+        quantize: QuantizeFn | None = None,
     ) -> None:
         super().__init__()
         self.global_intermediate_size = intermediate_size
@@ -177,11 +242,17 @@ class Qwen3MLP(nn.Module):
             hidden_size,
             (intermediate_size, intermediate_size),
             tensor_parallel,
+            quant=(
+                quantize(f"{module_prefix}.gate_proj", f"{module_prefix}.up_proj")
+                if quantize
+                else None
+            ),
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             tensor_parallel,
+            quant=quantize(f"{module_prefix}.down_proj") if quantize else None,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -199,11 +270,15 @@ class Qwen3Experts(nn.Module):
     the following Attention TP layer still requires replicated tokens.
     """
 
+    keep_dtype_parameters: tuple[str, ...] = ()
+
     def __init__(
         self,
         config: ModelConfig,
         expert_parallel: TensorParallelContext,
         dispatch_backend: str,
+        *,
+        quant: Fp8QuantConfig | None = None,
     ) -> None:
         super().__init__()
         valid_backends = {"naive", "sorted", "grouped", "triton_grouped", "all_to_all"}
@@ -223,26 +298,89 @@ class Qwen3Experts(nn.Module):
         self.local_expert_start = expert_parallel.rank * self.num_local_experts
         self.local_expert_end = self.local_expert_start + self.num_local_experts
         self.intermediate_size = config.moe_intermediate_size
-        self.gate_up_proj = nn.Parameter(
-            torch.empty(
-                self.num_local_experts,
-                2 * config.moe_intermediate_size,
-                config.hidden_size,
-            )
+        self.quant = quant
+        gate_up_shape = (
+            self.num_local_experts,
+            2 * config.moe_intermediate_size,
+            config.hidden_size,
         )
-        self.down_proj = nn.Parameter(
-            torch.empty(
-                self.num_local_experts,
-                config.hidden_size,
-                config.moe_intermediate_size,
+        down_shape = (self.num_local_experts, config.hidden_size, config.moe_intermediate_size)
+        if quant is None:
+            self.gate_up_proj = nn.Parameter(torch.empty(gate_up_shape))
+            self.down_proj = nn.Parameter(torch.empty(down_shape))
+        else:
+            block_n, block_k = quant.weight_block_size
+            if config.moe_intermediate_size % block_n:
+                # gate/up 在输出维拼接，每段必须从 scale tile 边界开始。
+                raise ValueError("FP8 expert intermediate size must be a multiple of block_n")
+            self.keep_dtype_parameters = (
+                "gate_up_proj",
+                "down_proj",
+                "gate_up_proj_scale_inv",
+                "down_proj_scale_inv",
             )
-        )
+            self.gate_up_proj = nn.Parameter(
+                torch.empty(gate_up_shape, dtype=FP8_DTYPE), requires_grad=False
+            )
+            self.down_proj = nn.Parameter(
+                torch.empty(down_shape, dtype=FP8_DTYPE), requires_grad=False
+            )
+            self.gate_up_proj_scale_inv = nn.Parameter(
+                torch.empty(
+                    self.num_local_experts,
+                    ceil_div(gate_up_shape[1], block_n),
+                    ceil_div(gate_up_shape[2], block_k),
+                ),
+                requires_grad=False,
+            )
+            self.down_proj_scale_inv = nn.Parameter(
+                torch.empty(
+                    self.num_local_experts,
+                    ceil_div(down_shape[1], block_n),
+                    ceil_div(down_shape[2], block_k),
+                ),
+                requires_grad=False,
+            )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for expert_idx in range(self.num_local_experts):
-            nn.init.kaiming_uniform_(self.gate_up_proj[expert_idx], a=5**0.5)
-            nn.init.kaiming_uniform_(self.down_proj[expert_idx], a=5**0.5)
+        if self.quant is None:
+            for expert_idx in range(self.num_local_experts):
+                nn.init.kaiming_uniform_(self.gate_up_proj[expert_idx], a=5**0.5)
+                nn.init.kaiming_uniform_(self.down_proj[expert_idx], a=5**0.5)
+            return
+        for weight, scale in (
+            (self.gate_up_proj, self.gate_up_proj_scale_inv),
+            (self.down_proj, self.down_proj_scale_inv),
+        ):
+            full = torch.empty(weight.shape, device=weight.device)
+            for expert_idx in range(self.num_local_experts):
+                nn.init.kaiming_uniform_(full[expert_idx], a=5**0.5)
+            quantized, scales = quantize_block_fp8(full, self.quant.weight_block_size)
+            with torch.no_grad():
+                weight.copy_(quantized)
+                scale.copy_(scales)
+
+    def _gate_up(self, expert_index, dtype: torch.dtype) -> torch.Tensor:
+        """One expert (int) or a batch of experts (tensor) in the activation dtype."""
+        if self.quant is None:
+            return self.gate_up_proj[expert_index]
+        return dequantize_block_fp8(
+            self.gate_up_proj[expert_index],
+            self.gate_up_proj_scale_inv[expert_index],
+            self.quant.weight_block_size,
+            dtype,
+        )
+
+    def _down(self, expert_index, dtype: torch.dtype) -> torch.Tensor:
+        if self.quant is None:
+            return self.down_proj[expert_index]
+        return dequantize_block_fp8(
+            self.down_proj[expert_index],
+            self.down_proj_scale_inv[expert_index],
+            self.quant.weight_block_size,
+            dtype,
+        )
 
     @property
     def source_experts(self) -> slice:
@@ -291,8 +429,10 @@ class Qwen3Experts(nn.Module):
             if token_idx.numel() == 0:
                 continue
             current = hidden_states[token_idx]
-            gate, up = F.linear(current, self.gate_up_proj[local_expert_idx]).chunk(2, dim=-1)
-            current = F.linear(F.silu(gate) * up, self.down_proj[local_expert_idx])
+            gate, up = F.linear(
+                current, self._gate_up(local_expert_idx, current.dtype)
+            ).chunk(2, dim=-1)
+            current = F.linear(F.silu(gate) * up, self._down(local_expert_idx, current.dtype))
             current = current * routing_weights[token_idx, top_k_slot, None]
             result.index_add_(0, token_idx, current.to(result.dtype))
         return result
@@ -333,11 +473,11 @@ class Qwen3Experts(nn.Module):
                 end = start + count
                 gate, up = F.linear(
                     sorted_inputs[start:end],
-                    self.gate_up_proj[expert_idx],
+                    self._gate_up(expert_idx, inputs.dtype),
                 ).chunk(2, dim=-1)
                 sorted_output[start:end] = F.linear(
                     F.silu(gate) * up,
-                    self.down_proj[expert_idx],
+                    self._down(expert_idx, inputs.dtype),
                 )
                 start = end
             output = torch.empty_like(sorted_output)
@@ -357,12 +497,12 @@ class Qwen3Experts(nn.Module):
         padded[active_batch, slots] = sorted_inputs
         gate_up = torch.bmm(
             padded,
-            self.gate_up_proj[active_experts].transpose(1, 2),
+            self._gate_up(active_experts, inputs.dtype).transpose(1, 2),
         )
         gate, up = gate_up.chunk(2, dim=-1)
         padded_output = torch.bmm(
             F.silu(gate) * up,
-            self.down_proj[active_experts].transpose(1, 2),
+            self._down(active_experts, inputs.dtype).transpose(1, 2),
         )
         sorted_output = padded_output[active_batch, slots]
         output = torch.empty_like(sorted_output)
@@ -380,8 +520,10 @@ class Qwen3Experts(nn.Module):
             indices = torch.where(local_experts == expert_idx)[0]
             if indices.numel() == 0:
                 continue
-            gate, up = F.linear(inputs[indices], self.gate_up_proj[expert_idx]).chunk(2, dim=-1)
-            output[indices] = F.linear(F.silu(gate) * up, self.down_proj[expert_idx])
+            gate, up = F.linear(
+                inputs[indices], self._gate_up(expert_idx, inputs.dtype)
+            ).chunk(2, dim=-1)
+            output[indices] = F.linear(F.silu(gate) * up, self._down(expert_idx, inputs.dtype))
         return output
 
     def _triton_grouped_expert_gemm(
@@ -395,11 +537,21 @@ class Qwen3Experts(nn.Module):
             return self._loop_expert_gemm(inputs, local_experts)
         from .triton_moe import triton_grouped_mlp
 
+        if self.quant is None:
+            return triton_grouped_mlp(
+                inputs.contiguous(),
+                local_experts,
+                self.gate_up_proj,
+                self.down_proj,
+            )
         return triton_grouped_mlp(
             inputs.contiguous(),
             local_experts,
             self.gate_up_proj,
             self.down_proj,
+            gate_up_scale=self.gate_up_proj_scale_inv,
+            down_scale=self.down_proj_scale_inv,
+            block_size=self.quant.weight_block_size,
         )
 
     def _forward_grouped(
@@ -571,11 +723,11 @@ class Qwen3Experts(nn.Module):
                 current = hidden_states[current_token_indices]
                 gate, up = F.linear(
                     current,
-                    self.gate_up_proj[local_expert_idx],
+                    self._gate_up(local_expert_idx, current.dtype),
                 ).chunk(2, dim=-1)
                 current = F.linear(
                     F.silu(gate) * up,
-                    self.down_proj[local_expert_idx],
+                    self._down(local_expert_idx, current.dtype),
                 )
                 current = current * routing_weights[
                     current_token_indices,
@@ -593,12 +745,40 @@ class Qwen3SparseMoeBlock(nn.Module):
         config: ModelConfig,
         expert_parallel: TensorParallelContext,
         dispatch_backend: str,
+        *,
+        module_prefix: str = "",
+        quantize: QuantizeFn | None = None,
     ) -> None:
         super().__init__()
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        self.experts = Qwen3Experts(config, expert_parallel, dispatch_backend)
+        self.experts = Qwen3Experts(
+            config,
+            expert_parallel,
+            dispatch_backend,
+            quant=(
+                quantize(
+                    f"{module_prefix}.experts.0.gate_proj",
+                    f"{module_prefix}.experts.0.up_proj",
+                    f"{module_prefix}.experts.0.down_proj",
+                )
+                if quantize
+                else None
+            ),
+        )
+        # Qwen3.5 MoE：每个 token 另经过一个共享专家，由 sigmoid 标量门控后与路由专家相加。
+        self.shared_expert: Qwen3MLP | None = None
+        self.shared_expert_gate: nn.Linear | None = None
+        if config.shared_expert_intermediate_size:
+            self.shared_expert = Qwen3MLP(
+                config.hidden_size,
+                config.shared_expert_intermediate_size,
+                expert_parallel,
+                module_prefix=f"{module_prefix}.shared_expert",
+                quantize=quantize,
+            )
+            self.shared_expert_gate = nn.Linear(config.hidden_size, 1, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         original_shape = x.shape
@@ -617,6 +797,10 @@ class Qwen3SparseMoeBlock(nn.Module):
             selected_experts,
             routing_weights.to(router_logits.dtype),
         )
+        if self.shared_expert is not None:
+            assert self.shared_expert_gate is not None
+            shared = self.shared_expert(hidden_states)
+            output = output + torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared
         return output.view(original_shape)
 
 
@@ -628,16 +812,64 @@ class Qwen3DecoderLayer(nn.Module):
         backend: AttentionBackend,
         tensor_parallel: TensorParallelContext,
         moe_dispatch_backend: str,
+        *,
+        kv_layer_idx: int | None = None,
+        state_layer_idx: int | None = None,
+        linear_attention_backend: str = "auto",
+        layer_type: str | None = None,
+        module_prefix: str | None = None,
+        quantize: QuantizeFn | None = None,
     ) -> None:
         super().__init__()
-        self.self_attn = Qwen3Attention(config, layer_idx, backend, tensor_parallel)
+        self.layer_type = config.layer_types[layer_idx] if layer_type is None else layer_type
+        prefix = module_prefix or f"layers.{layer_idx}"
+        self.self_attn: Qwen3Attention | None = None
+        self.linear_attn: Qwen3_5GatedDeltaNet | None = None
+        if self.layer_type == LINEAR_ATTENTION:
+            assert state_layer_idx is not None
+            self.linear_attn = Qwen3_5GatedDeltaNet(
+                config,
+                layer_idx,
+                state_layer_idx,
+                tensor_parallel,
+                backend=linear_attention_backend,
+                quantize=quantize,
+            )
+        else:
+            self.self_attn = Qwen3Attention(
+                config,
+                layer_idx,
+                backend,
+                tensor_parallel,
+                kv_layer_idx=kv_layer_idx,
+                module_prefix=f"{prefix}.self_attn",
+                quantize=quantize,
+            )
+        sparse = config.is_sparse_layer(layer_idx) if layer_type is None else config.is_moe
         self.mlp = (
-            Qwen3SparseMoeBlock(config, tensor_parallel, moe_dispatch_backend)
-            if config.is_sparse_layer(layer_idx)
-            else Qwen3MLP(config.hidden_size, config.intermediate_size, tensor_parallel)
+            Qwen3SparseMoeBlock(
+                config,
+                tensor_parallel,
+                moe_dispatch_backend,
+                module_prefix=f"{prefix}.mlp",
+                quantize=quantize,
+            )
+            if sparse
+            else Qwen3MLP(
+                config.hidden_size,
+                config.intermediate_size,
+                tensor_parallel,
+                module_prefix=f"{prefix}.mlp",
+                quantize=quantize,
+            )
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        zero_centered = config.is_qwen3_5
+        self.input_layernorm = RMSNorm(
+            config.hidden_size, config.rms_norm_eps, zero_centered=zero_centered
+        )
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, config.rms_norm_eps, zero_centered=zero_centered
+        )
 
     def forward(
         self,
@@ -645,18 +877,62 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
+        state_batch: RecurrentStateBatch | None = None,
     ) -> torch.Tensor:
-        x = x + self.self_attn(
-            self.input_layernorm(x),
-            positions,
-            kv_cache,
-            cache_batch,
-        )
+        normalized = self.input_layernorm(x)
+        if self.linear_attn is not None:
+            x = x + self.linear_attn(normalized, state_batch)
+        else:
+            assert self.self_attn is not None
+            x = x + self.self_attn(normalized, positions, kv_cache, cache_batch)
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
+class Qwen3_5MultiTokenPredictor(nn.Module):
+    """Qwen3.5 MTP head: predicts token ``t+2`` from ``h_t`` and ``embed(t+1)``.
+
+    The input is ``fc([norm(embed(next_token)), norm(target_hidden)])``, followed by one
+    full-attention decoder layer with its own K/V, a final norm and the shared LM head.
+    Its K/V lives in a companion paged cache at exactly the target's token positions.
+    """
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        backend: AttentionBackend,
+        tensor_parallel: TensorParallelContext,
+        moe_dispatch_backend: str,
+        *,
+        quantize: QuantizeFn | None = None,
+    ) -> None:
+        super().__init__()
+        self.pre_fc_norm_embedding = RMSNorm(
+            config.hidden_size, config.rms_norm_eps, zero_centered=True
+        )
+        self.pre_fc_norm_hidden = RMSNorm(
+            config.hidden_size, config.rms_norm_eps, zero_centered=True
+        )
+        # 官方 FP8 checkpoint 把 mtp.fc 列在 modules_to_not_convert 中，这里始终保持 BF16。
+        self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+        self.layers = nn.ModuleList(
+            Qwen3DecoderLayer(
+                config,
+                config.full_attention_layers[0],
+                backend,
+                tensor_parallel,
+                moe_dispatch_backend,
+                kv_layer_idx=index,
+                layer_type="full_attention",
+                module_prefix=f"mtp.layers.{index}",
+                quantize=quantize,
+            )
+            for index in range(config.mtp_num_hidden_layers)
+        )
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps, zero_centered=True)
+
+
 class Qwen3ForCausalLM(nn.Module):
-    """Dense Qwen3 and Qwen3MoE inference model sharing the paged-attention path."""
+    """Dense/MoE Qwen3 and the Qwen3.5 hybrid family sharing one paged-attention path."""
 
     def __init__(
         self,
@@ -665,17 +941,30 @@ class Qwen3ForCausalLM(nn.Module):
         attention_backend: AttentionBackend | None = None,
         tensor_parallel: TensorParallelContext | None = None,
         moe_dispatch_backend: str = "sorted",
+        linear_attention_backend: str = "auto",
+        enable_mtp: bool = False,
+        fp8_weights: bool = True,
     ) -> None:
         super().__init__()
         self.config = config
         self.attention_backend = attention_backend or TorchAttentionBackend()
         self.tensor_parallel = tensor_parallel or TensorParallelContext()
         self.moe_dispatch_backend = moe_dispatch_backend
-        self.kv_cache_num_heads = self.tensor_parallel.local_size(
-            config.num_key_value_heads,
-            "num_key_value_heads",
+        self.linear_attention_backend = linear_attention_backend
+        if enable_mtp and not config.mtp_num_hidden_layers:
+            raise ValueError("this checkpoint does not contain MTP layers")
+        # fp8_weights=False 时，FP8 checkpoint 在加载时反量化为普通权重（用作数值对照）。
+        self.fp8 = config.quantization if fp8_weights else None
+        quantize = self._quantize_for if self.fp8 is not None else None
+        self.kv_cache_num_heads = config.num_key_value_heads // kv_shard_count(
+            config,
+            self.tensor_parallel,
         )
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        kv_layers = {layer: index for index, layer in enumerate(config.full_attention_layers)}
+        state_layers = {
+            layer: index for index, layer in enumerate(config.linear_attention_layers)
+        }
         self.layers = nn.ModuleList(
             Qwen3DecoderLayer(
                 config,
@@ -683,26 +972,84 @@ class Qwen3ForCausalLM(nn.Module):
                 self.attention_backend,
                 self.tensor_parallel,
                 moe_dispatch_backend,
+                kv_layer_idx=kv_layers.get(layer_idx),
+                state_layer_idx=state_layers.get(layer_idx),
+                linear_attention_backend=linear_attention_backend,
+                quantize=quantize,
             )
             for layer_idx in range(config.num_layers)
         )
-        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm = RMSNorm(
+            config.hidden_size, config.rms_norm_eps, zero_centered=config.is_qwen3_5
+        )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.mtp = (
+            Qwen3_5MultiTokenPredictor(
+                config,
+                self.attention_backend,
+                self.tensor_parallel,
+                moe_dispatch_backend,
+                quantize=quantize,
+            )
+            if enable_mtp
+            else None
+        )
         self.tie_weights()
+
+    def _quantize_for(self, *hf_module_names: str) -> Fp8QuantConfig | None:
+        """FP8 config when every fused checkpoint Linear is stored as block FP8."""
+        assert self.fp8 is not None
+        decisions = {self.fp8.is_quantized(name) for name in hf_module_names}
+        if len(decisions) != 1:
+            raise ValueError(f"cannot fuse FP8 and unquantized Linears: {hf_module_names}")
+        return self.fp8 if decisions.pop() else None
+
+    @property
+    def num_kv_cache_layers(self) -> int:
+        return len(self.config.full_attention_layers)
+
+    @property
+    def num_draft_kv_layers(self) -> int:
+        return 0 if self.mtp is None else len(self.mtp.layers)
+
+    @property
+    def linear_attention_modules(self) -> tuple[Qwen3_5GatedDeltaNet, ...]:
+        return tuple(layer.linear_attn for layer in self.layers if layer.linear_attn is not None)
+
+    @property
+    def recurrent_state_spec(self) -> RecurrentStateSpec | None:
+        modules = self.linear_attention_modules
+        if not modules:
+            return None
+        first = modules[0]
+        return RecurrentStateSpec(
+            num_layers=len(modules),
+            conv_dim=first.conv_dim,
+            conv_kernel_size=first.conv_kernel_size,
+            num_heads=first.num_v_heads,
+            head_k_dim=first.head_k_dim,
+            head_v_dim=first.head_v_dim,
+        )
 
     def tie_weights(self) -> None:
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
 
+    def _decoder_layers(self):
+        yield from self.layers
+        if self.mtp is not None:
+            yield from self.mtp.layers
+
     def set_moe_cuda_graph_static_dispatch(self, enabled: bool) -> None:
         """Select fixed assignment slots only while a MoE Decode graph is captured."""
-        for layer in self.layers:
+        for layer in self._decoder_layers():
             if isinstance(layer.mlp, Qwen3SparseMoeBlock):
                 layer.mlp.experts.cuda_graph_static_dispatch = enabled
 
     def reset_non_persistent_buffers(self, device: torch.device | str) -> None:
-        for layer in self.layers:
-            layer.self_attn.rope.reset_buffer(device)
+        for layer in self._decoder_layers():
+            if layer.self_attn is not None:
+                layer.self_attn.rope.reset_buffer(device)
 
     @classmethod
     def from_pretrained(
@@ -714,6 +1061,9 @@ class Qwen3ForCausalLM(nn.Module):
         attention_backend: AttentionBackend | None = None,
         tensor_parallel: TensorParallelContext | None = None,
         moe_dispatch_backend: str = "sorted",
+        linear_attention_backend: str = "auto",
+        enable_mtp: bool = False,
+        fp8_weights: bool = True,
     ) -> Qwen3ForCausalLM:
         from .loader import load_qwen3_model
 
@@ -724,6 +1074,9 @@ class Qwen3ForCausalLM(nn.Module):
             attention_backend=attention_backend,
             tensor_parallel=tensor_parallel,
             moe_dispatch_backend=moe_dispatch_backend,
+            linear_attention_backend=linear_attention_backend,
+            enable_mtp=enable_mtp,
+            fp8_weights=fp8_weights,
         )
 
     def validate_cache(self, cache: PagedKVCache) -> None:
@@ -732,6 +1085,13 @@ class Qwen3ForCausalLM(nn.Module):
                 "KV cache head count does not match this TP rank: "
                 f"{cache.num_kv_heads} != {self.kv_cache_num_heads}"
             )
+        if cache.num_layers != self.num_kv_cache_layers:
+            raise ValueError(
+                "KV cache layer count does not match the full-attention layers: "
+                f"{cache.num_layers} != {self.num_kv_cache_layers}"
+            )
+        if self.recurrent_state_spec is not None and getattr(cache, "recurrent", None) is None:
+            raise ValueError("hybrid linear-attention models require recurrent state slots")
         self.attention_backend.validate_cache(cache)
 
     def forward(
@@ -777,6 +1137,35 @@ class Qwen3ForCausalLM(nn.Module):
         kv_cache: PagedKVCache,
         cache_batch: PagedKVBatch,
         logits_indices: tuple[int, ...] | None = None,
+        state_batch: RecurrentStateBatch | None = None,
+        return_hidden: bool = False,
+    ):
+        """Cached forward. ``return_hidden`` also returns every final (normed) hidden row,
+        which the MTP head consumes; ``state_batch`` overrides the default slot batch,
+        e.g. to run speculative verification in log mode."""
+        positions = self._validate_prepared(input_ids, cache_batch)
+        self._validate_logits_indices(logits_indices, input_ids.numel())
+        if state_batch is None and self.recurrent_state_spec is not None:
+            recurrent = getattr(kv_cache, "recurrent", None)
+            if recurrent is None:
+                raise ValueError("hybrid linear-attention models require recurrent state slots")
+            state_batch = recurrent.prepare_batch(
+                cache_batch.request_ids, cache_batch.append_lengths
+            )
+        return self._forward_tokens(
+            input_ids,
+            positions,
+            kv_cache,
+            cache_batch,
+            logits_indices,
+            state_batch=state_batch,
+            return_hidden=return_hidden,
+        )
+
+    def _validate_prepared(
+        self,
+        input_ids: torch.Tensor,
+        cache_batch: PagedKVBatch,
     ) -> torch.Tensor:
         if input_ids.ndim == 2:
             if input_ids.size(0) != cache_batch.batch_size:
@@ -794,16 +1183,9 @@ class Qwen3ForCausalLM(nn.Module):
             raise ValueError("input_ids must be dense rank 2 or packed rank 1")
         if input_ids.numel() != cache_batch.total_tokens:
             raise ValueError("input token count disagrees with cache metadata")
-        self._validate_logits_indices(logits_indices, input_ids.numel())
         if cache_batch.max_end > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
-        return self._forward_tokens(
-            input_ids,
-            positions,
-            kv_cache,
-            cache_batch,
-            logits_indices,
-        )
+        return positions
 
     def forward_packed(
         self,
@@ -813,7 +1195,9 @@ class Qwen3ForCausalLM(nn.Module):
         cache_request_ids: tuple[str, ...],
         append_lengths: tuple[int, ...],
         logits_indices: tuple[int, ...] | None = None,
-    ) -> torch.Tensor:
+        state_batch: RecurrentStateBatch | None = None,
+        return_hidden: bool = False,
+    ):
         if input_ids.ndim != 1:
             raise ValueError("packed input_ids must have shape [total_tokens]")
         if input_ids.numel() == 0:
@@ -827,7 +1211,60 @@ class Qwen3ForCausalLM(nn.Module):
             kv_cache=kv_cache,
             cache_batch=cache_batch,
             logits_indices=logits_indices,
+            state_batch=state_batch,
+            return_hidden=return_hidden,
         )
+
+    def forward_mtp(
+        self,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        *,
+        kv_cache: PagedKVCache,
+        cache_batch: PagedKVBatch,
+        logits_indices: tuple[int, ...] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the MTP head on packed ``(next token, target hidden)`` pairs.
+
+        Row ``i`` pairs the hidden state at position ``p`` with the token at ``p + 1``
+        and writes draft K/V at position ``p``. Returns logits at ``logits_indices`` and
+        every normed MTP hidden row, which seeds the next recursive draft step.
+        """
+        if self.mtp is None:
+            raise RuntimeError("the model was loaded without its MTP layers")
+        positions = self._validate_prepared(input_ids, cache_batch)
+        self._validate_logits_indices(logits_indices, input_ids.numel())
+        if hidden_states.shape[:-1] != input_ids.shape:
+            raise ValueError("MTP hidden states must align with the input tokens")
+        embeddings = self.mtp.pre_fc_norm_embedding(self.embed_tokens(input_ids))
+        hidden = self.mtp.pre_fc_norm_hidden(hidden_states.to(embeddings.dtype))
+        hidden = self.mtp.fc(torch.cat((embeddings, hidden), dim=-1))
+        for layer in self.mtp.layers:
+            hidden = layer(hidden, positions, kv_cache, cache_batch)
+        hidden = self.mtp.norm(hidden)
+        return self._logits(hidden, logits_indices), hidden
+
+    @torch.no_grad()
+    def commit_speculative_states(
+        self,
+        state_batch: RecurrentStateBatch,
+        accepted_lengths: tuple[int, ...] | torch.Tensor,
+    ) -> None:
+        """Advance DeltaNet slots by the accepted prefix of a verify forward.
+
+        Equal-width verification uses the fixed-shape masked replay (one set of kernels,
+        capturable); ragged n-gram verification replays only the accepted rows.
+        """
+        uniform = len(set(state_batch.append_lengths)) == 1
+        if isinstance(accepted_lengths, torch.Tensor) or uniform:
+            lengths = accepted_lengths
+            if not isinstance(lengths, torch.Tensor):
+                lengths = torch.tensor(lengths, dtype=torch.long, device=state_batch.slots.device)
+            for module in self.linear_attention_modules:
+                module.commit_speculative_masked(state_batch, lengths)
+            return
+        for module in self.linear_attention_modules:
+            module.commit_speculative(state_batch, accepted_lengths)
 
     @staticmethod
     def _validate_logits_indices(
@@ -840,6 +1277,19 @@ class Qwen3ForCausalLM(nn.Module):
         ):
             raise ValueError("logits_indices must contain valid token indices")
 
+    def _logits(
+        self,
+        normalized: torch.Tensor,
+        logits_indices: tuple[int, ...] | None,
+    ) -> torch.Tensor:
+        if logits_indices is None:
+            return self.lm_head(normalized).float()
+        if not logits_indices:
+            return normalized.new_empty((0, self.config.vocab_size), dtype=torch.float32)
+        flat = normalized.reshape(-1, normalized.size(-1))
+        indices = torch.tensor(logits_indices, dtype=torch.long, device=normalized.device)
+        return self.lm_head(flat.index_select(0, indices)).float()
+
     def _forward_tokens(
         self,
         input_ids: torch.Tensor,
@@ -847,13 +1297,23 @@ class Qwen3ForCausalLM(nn.Module):
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
         logits_indices: tuple[int, ...] | None = None,
-    ) -> torch.Tensor:
+        *,
+        state_batch: RecurrentStateBatch | None = None,
+        return_hidden: bool = False,
+    ):
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, positions, kv_cache, cache_batch)
-        if logits_indices is not None:
-            if not logits_indices:
-                return hidden_states.new_empty((0, self.config.vocab_size), dtype=torch.float32)
-            indices = torch.tensor(logits_indices, dtype=torch.long, device=hidden_states.device)
-            hidden_states = hidden_states.index_select(0, indices)
-        return self.lm_head(self.norm(hidden_states)).float()
+            hidden_states = layer(hidden_states, positions, kv_cache, cache_batch, state_batch)
+        if not return_hidden:
+            if logits_indices is not None:
+                if not logits_indices:
+                    return hidden_states.new_empty(
+                        (0, self.config.vocab_size), dtype=torch.float32
+                    )
+                indices = torch.tensor(
+                    logits_indices, dtype=torch.long, device=hidden_states.device
+                )
+                hidden_states = hidden_states.index_select(0, indices)
+            return self.lm_head(self.norm(hidden_states)).float()
+        normalized = self.norm(hidden_states)
+        return self._logits(normalized, logits_indices), normalized

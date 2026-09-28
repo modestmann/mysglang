@@ -18,6 +18,8 @@ class SchedulerConfig:
     speculative_ngram_max_tokens: int = 0
     speculative_ngram_min_match: int = 2
     speculative_ngram_max_match: int = 8
+    # 0 表示关闭。开启后用模型自带的 MTP 层为 greedy 请求递归生成这么多个草稿 token。
+    speculative_mtp_steps: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -46,12 +48,17 @@ class SchedulerConfig:
             "speculative_ngram_max_tokens",
             "speculative_ngram_min_match",
             "speculative_ngram_max_match",
+            "speculative_mtp_steps",
         ):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TypeError(f"{name} must be an integer")
         if self.speculative_ngram_max_tokens < 0:
             raise ValueError("speculative_ngram_max_tokens must be non-negative")
+        if self.speculative_mtp_steps < 0:
+            raise ValueError("speculative_mtp_steps must be non-negative")
+        if self.speculative_mtp_steps and self.speculative_ngram_max_tokens:
+            raise ValueError("choose either MTP or n-gram speculative decoding, not both")
         if self.speculative_ngram_min_match <= 0:
             raise ValueError("speculative_ngram_min_match must be positive")
         if self.speculative_ngram_max_match < self.speculative_ngram_min_match:

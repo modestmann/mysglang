@@ -53,11 +53,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--speculative-ngram-max-tokens", type=int, default=0)
     parser.add_argument("--speculative-ngram-min-match", type=int, default=2)
     parser.add_argument("--speculative-ngram-max-match", type=int, default=8)
+    parser.add_argument("--speculative-mtp-steps", type=int, default=0)
+    parser.add_argument(
+        "--linear-attention-backend", choices=("auto", "torch", "fla"), default="auto"
+    )
+    parser.add_argument("--dequantize-fp8", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="wrap --prompt (and --system) in the chat template instead of repeating raw "
+        "tokens; gives realistic speculative acceptance, --prompt-tokens is then ignored",
+    )
     parser.add_argument("--system")
     parser.add_argument("--prompt")
     parser.add_argument("--gpu-sample-ms", type=int, default=200)
@@ -164,7 +175,14 @@ async def _one_batch(
     args: argparse.Namespace,
     output_tokens: int,
 ) -> tuple[list[dict[str, Any]], float]:
-    prompt_ids = _fixed_prompt_ids(service, args.prompt_tokens, args.prompt)
+    if args.chat:
+        messages = [{"role": "system", "content": args.system}] if args.system else []
+        messages.append({"role": "user", "content": args.prompt or "请简洁介绍大语言模型推理。"})
+        prompt_ids = tuple(
+            service.tokenizer.apply_chat_template(messages, enable_thinking=args.thinking)
+        )
+    else:
+        prompt_ids = _fixed_prompt_ids(service, args.prompt_tokens, args.prompt)
     sessions = [
         service._start_token_ids(
             prompt_ids,
@@ -221,6 +239,7 @@ def _scheduler_delta(before: Any, after: Any) -> dict[str, int | float]:
         "speculative_verify_forwards",
         "speculative_draft_tokens",
         "speculative_accepted_tokens",
+        "speculative_draft_forwards",
     }
     result = asdict(after)
     for name in cumulative:
@@ -264,8 +283,10 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "dtype": args.dtype,
             "world_size": int(os.environ.get("WORLD_SIZE", "1")),
             "concurrency": args.concurrency,
-            "prompt_tokens_per_request": args.prompt_tokens,
+            "prompt_tokens_per_request": None if args.chat else args.prompt_tokens,
             "prompt_override": args.prompt,
+            "chat_template": args.chat,
+            "thinking": args.thinking,
             "max_new_tokens_per_request": args.max_new_tokens,
             "num_pages": args.num_pages,
             "prefill_token_budget": args.prefill_token_budget,
@@ -275,6 +296,9 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
                 "min_match": args.speculative_ngram_min_match,
                 "max_match": args.speculative_ngram_max_match,
             },
+            "speculative_mtp_steps": args.speculative_mtp_steps,
+            "linear_attention_backend": args.linear_attention_backend,
+            "dequantize_fp8": args.dequantize_fp8,
             "sampling": {
                 "temperature": args.temperature,
                 "top_k": args.top_k,

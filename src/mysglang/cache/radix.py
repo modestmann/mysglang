@@ -331,13 +331,21 @@ class RadixPrefixCache:
 class RadixPagedKVCache(PagedKVCache):
     """Paged KV storage whose complete pages can outlive and serve requests."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, *, enable_prefix_cache: bool = True, **kwargs) -> None:
         super().__init__(**kwargs)
         self.prefix_cache = RadixPrefixCache(self.page_size)
+        # 递归状态（DeltaNet）无法从页面前缀恢复，混合模型因此关闭前缀复用；
+        # 关闭后仍复用同一套 handle/reservation 路径，只是永远匹配根节点。
+        self.enable_prefix_cache = enable_prefix_cache
         self._handles: dict[str, RadixCacheHandle] = {}
 
+    def _match(self, token_ids: Sequence[int], *, record: bool) -> RadixCacheHandle:
+        if not self.enable_prefix_cache:
+            return RadixCacheHandle(0, self.prefix_cache.root)
+        return self.prefix_cache.match_prefix(token_ids, record=record)
+
     def can_reserve_request(self, max_tokens: int, prompt_token_ids: Sequence[int]) -> bool:
-        handle = self.prefix_cache.match_prefix(prompt_token_ids[:-1], record=False)
+        handle = self._match(prompt_token_ids[:-1], record=False)
         total_pages = self.allocator.pages_for_tokens(max_tokens)
         private_pages = total_pages - len(handle.pages)
         newly_protected = self._newly_protected_pages(handle)
@@ -351,7 +359,7 @@ class RadixPagedKVCache(PagedKVCache):
         max_tokens: int,
         prompt_token_ids: Sequence[int],
     ) -> int | None:
-        handle = self.prefix_cache.match_prefix(prompt_token_ids[:-1])
+        handle = self._match(prompt_token_ids[:-1], record=True)
         self.prefix_cache.lock(handle)
         total_pages = self.allocator.pages_for_tokens(max_tokens)
         private_pages = total_pages - len(handle.pages)
@@ -398,6 +406,8 @@ class RadixPagedKVCache(PagedKVCache):
         reuse it immediately while the publisher is still decoding.
         """
         self._validate_request(request_id)
+        if not self.enable_prefix_cache:
+            return 0
         length = self.lengths((request_id,))[0]
         cacheable_length = min(length, len(token_ids))
         cacheable_length -= cacheable_length % self.page_size

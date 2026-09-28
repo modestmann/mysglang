@@ -106,7 +106,31 @@ Triton、MoE Graph 与 n-gram A/B 均已完成。不再扩展 TP×EP mesh。
 
 验收：TP=1 与 TP=2 logits/token 对齐；所有 rank 对请求顺序、页表和采样位置达成一致。
 
-## 6. 正式客户端与评测
+## 6. Qwen3.5 / Qwen3.6 混合架构（reference 与本地验收已完成）
+
+- 已实现 Gated DeltaNet（PyTorch chunk/递归 reference + fla kernel）、Gated Attention、部分 RoPE、
+  零中心 RMSNorm、shared expert，与 Transformers 小模型 dense/MoE logits 对齐；
+- 已加入 `RecurrentStatePool` 与 `HybridPagedKVCache`：状态 slot 与页一起预留/释放，
+  chunked prefill、mixed batch、abort 均与 oracle 对齐；混合模型关闭 radix 前缀复用；
+- 已实现 MTP 投机：递归草稿、log 模式 verify、DeltaNet replay（等宽时掩码 replay）、
+  MTP 追赶与草稿 K/V 对齐不变量；n-gram 共用同一 verify/回滚；TP=2/4 与 TP=1 对齐；
+  greedy（含 penalty）与随机采样（投机采样，分布精确）都能起草；
+- 已实现分块 FP8：FP8 参数与 scale 的 TP 切分、Triton W8A16 linear 与 grouped MoE、
+  `--dequantize-fp8` 对照；KV 头少于 TP 时按 GQA 分组复制；
+- 混合模型的 Decode、verify、MTP 草稿/追赶与状态提交均可 CUDA Graph，输出与 eager 一致；
+- 接口：多停止 token、presence/frequency penalty、`reasoning_content`、`qwen3_coder` 工具调用、
+  `chat_template_kwargs`、OpenAI 兼容 `mysglang.server`；
+- 本地真实 Qwen3.5-0.8B BF16 与 Transformers greedy 逐 token 一致；35B-A3B-FP8 通过离线布局校验。
+
+下一步（需要 4×RTX 4090）：
+
+1. `validate_transformers.py` 风格的 token oracle（Transformers `device_map` BF16 反量化作对照）；
+2. TP=4 显存、`--moe-dispatch sorted/triton_grouped`、Graph 开关与 MTP k=1/2/3 的吞吐 A/B；
+3. 视测量结果决定：radix 状态快照、FP8 tensor core（W8A8）、MTP 草稿树（topk>1）。
+
+验收：真实 35B 的 greedy token 与反量化参考在约定位置内一致；四卡无残留显存；MTP 接受率与加速比有 JSONL 记录。
+
+## 7. 正式客户端与评测
 
 模型主链可用后再建立稳定的请求客户端和评测集：
 
@@ -120,7 +144,7 @@ Triton、MoE Graph 与 n-gram A/B 均已完成。不再扩展 TP×EP mesh。
 
 单元测试负责状态和资源不变量，模型 oracle 负责数值正确性，客户端/数据集负责端到端质量与性能；三者不能互相替代。
 
-## 7. 可选方向
+## 8. 可选方向
 
 - 更完整的 n-gram trie/token tree、草稿模型投机和精确随机采样验证；
 - host/disk 分层 KV Cache 与异步预取；

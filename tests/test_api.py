@@ -158,6 +158,38 @@ class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(empty.status_code, 400)
         self.assertIn("non-empty", empty.json()["detail"])
 
+    async def test_openai_chat_fields_models_and_text_only_validation(self) -> None:
+        models = await self.client.get("/v1/models")
+        self.assertEqual(models.json()["data"][0]["id"], "mysglang")
+
+        chat = await self.client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                ],
+                "max_completion_tokens": 3,
+                "presence_penalty": 1.5,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+        self.assertEqual(chat.status_code, 200)
+        body = chat.json()
+        self.assertEqual(body["usage"]["completion_tokens"], 3)
+        # The byte tokenizer has no <think> tokens, so no reasoning field is produced.
+        self.assertNotIn("reasoning_content", body["choices"][0]["message"])
+
+        image = await self.client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}
+                ]
+            },
+        )
+        self.assertEqual(image.status_code, 400)
+        self.assertIn("text-only", image.json()["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

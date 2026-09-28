@@ -34,8 +34,22 @@ class SamplingParams:
     top_k: int = 0
     top_p: float = 1.0
     seed: int | None = None
+    # 除 eos_token_id 外的停止 token，例如 Qwen 的 <|im_end|> 与 <|endoftext|>。
+    stop_token_ids: tuple[int, ...] = ()
+    # OpenAI 语义：只统计已生成 token，logit -= presence * [出现过] + frequency * 次数。
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "stop_token_ids", tuple(self.stop_token_ids))
+        for token_id in self.stop_token_ids:
+            _validate_token_id(token_id, name="stop_token_ids")
+        for name in ("presence_penalty", "frequency_penalty"):
+            value = getattr(self, name)
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{name} must be a number")
+            if not -2 <= value <= 2:
+                raise ValueError(f"{name} must be in [-2, 2]")
         if not isinstance(self.max_new_tokens, int) or isinstance(self.max_new_tokens, bool):
             raise TypeError("max_new_tokens must be an integer")
         if self.max_new_tokens <= 0:
@@ -63,6 +77,19 @@ class SamplingParams:
     @property
     def is_greedy(self) -> bool:
         return self.temperature == 0
+
+    @property
+    def has_penalties(self) -> bool:
+        return bool(self.presence_penalty or self.frequency_penalty)
+
+    @property
+    def all_stop_token_ids(self) -> frozenset[int]:
+        if self.ignore_eos:
+            return frozenset()
+        stops = set(self.stop_token_ids)
+        if self.eos_token_id is not None:
+            stops.add(self.eos_token_id)
+        return frozenset(stops)
 
 
 # 冻结字段：增量输出事件创建后不允许被消费者修改。
@@ -192,11 +219,7 @@ class Request:
 
     def _finish_reason(self, token_id: int) -> FinishReason | None:
         params = self.sampling_params
-        if (
-            not params.ignore_eos
-            and params.eos_token_id is not None
-            and token_id == params.eos_token_id
-        ):
+        if token_id in params.all_stop_token_ids:
             return FinishReason.EOS
         if self.num_output_tokens >= params.max_new_tokens:
             return FinishReason.LENGTH
