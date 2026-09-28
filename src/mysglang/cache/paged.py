@@ -42,6 +42,10 @@ class PagedKVBatch:
     slot_mapping: torch.Tensor
     _owner_token: object = field(repr=False, compare=False)
     commit_lengths: bool = True
+    # 与 K/V 下标不同的 RoPE 位置：decode 时为下标 + rope_delta（[tokens]），
+    # 图片 prompt 的 prefill 为三轴 M-RoPE 位置（[3, tokens]）。纯文本两者都为 None。
+    rope_positions: torch.Tensor | None = None
+    mrope_positions: torch.Tensor | None = None
 
     @property
     def batch_size(self) -> int:
@@ -90,6 +94,8 @@ class PagedKVDecodeBuffer:
     _owner_token: object = field(repr=False, compare=False)
     # 每个请求本轮追加的 token 数：普通 Decode 为 1，投机 verify 为 1 + 草稿长度。
     append_length: int = 1
+    # RoPE 位置（K/V 下标 + 每请求 rope_delta）；地址固定，CUDA Graph 每轮只改内容。
+    rope_positions: torch.Tensor | None = None
 
     @property
     def batch_size(self) -> int:
@@ -527,6 +533,9 @@ class PagedKVCache:
             ),
             _owner_token=self._batch_owner_token,
             append_length=append_length,
+            rope_positions=torch.empty(
+                batch_size * append_length, dtype=torch.long, device=device
+            ),
         )
 
     def prepare_decode_batch(
@@ -535,6 +544,7 @@ class PagedKVCache:
         buffer: PagedKVDecodeBuffer,
         *,
         commit_lengths: bool = True,
+        rope_deltas: Sequence[int] | None = None,
     ) -> PagedKVBatch:
         """Fill fixed Decode metadata buffers without replacing their device tensors."""
         requests = self._validate_requests(request_ids)
@@ -579,6 +589,16 @@ class PagedKVCache:
 
         buffer.cache_seqlens.copy_(torch.tensor(starts, dtype=torch.int32))
         buffer.positions.copy_(torch.tensor(positions, dtype=torch.long))
+        deltas = rope_deltas or (0,) * len(requests)
+        if len(deltas) != len(requests):
+            raise ValueError("rope_deltas must contain one value per request")
+        rope_positions = [
+            positions[index * append_length + offset] + delta
+            for index, delta in enumerate(deltas)
+            for offset in range(append_length)
+        ]
+        if buffer.rope_positions is not None:
+            buffer.rope_positions.copy_(torch.tensor(rope_positions, dtype=torch.long))
         buffer.slot_mapping.copy_(torch.tensor(slots, dtype=torch.long))
         buffer.cu_seqlens_k.copy_(torch.tensor(cumulative_k, dtype=torch.int32))
         return PagedKVBatch(
@@ -594,6 +614,7 @@ class PagedKVCache:
             slot_mapping=buffer.slot_mapping,
             _owner_token=self._batch_owner_token,
             commit_lengths=commit_lengths,
+            rope_positions=buffer.rope_positions,
         )
 
     def _build_batch(

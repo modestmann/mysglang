@@ -14,7 +14,8 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - Qwen3.5/3.6 混合架构（Gated DeltaNet + Gated Attention + shared expert），DeltaNet 递归状态 slot 与 paged KV 共存；
 - 模型自带 MTP 层的投机解码：递归草稿、log 模式 verify、DeltaNet 掩码 replay 回滚，覆盖 CUDA Graph；
 - 官方 128×128 分块 FP8 checkpoint：FP8 权重 + scale 的 TP 切分、Triton W8A16 linear 与 grouped MoE kernel；
-- OpenAI 兼容 `/v1/chat/completions`：`reasoning_content`、`qwen3_coder` 工具调用、presence penalty；
+- OpenAI 兼容 `/v1/chat/completions`：`reasoning_content`、`qwen3_coder` 工具调用、presence penalty、图片输入；
+- Qwen3.5 视觉塔（ViT + 2×2 合并器）与交错 M-RoPE：图片预处理与 HF 逐位一致，图片请求可 chunked prefill、MTP 与 CUDA Graph；
 - SafeTensors 加载、Hugging Face chat template、增量 detokenization；
 - greedy、temperature、top-k、top-p 与 per-request seed 采样；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
@@ -144,6 +145,22 @@ curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '
   "presence_penalty": 1.5, "chat_template_kwargs": {"enable_thinking": true}}'
 ```
 
+图片输入（checkpoint 带视觉塔时默认加载，`--no-vision` 关闭）。CLI 用 `--image` 附图，
+交互模式里 `/image PATH` 给下一句附图；HTTP 用 OpenAI 的 `image_url` content part：
+
+```bash
+PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B --backend flash \
+  --image ./cat.png --prompt "这张图里有什么？"
+
+curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
+  "messages": [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+    {"type": "text", "text": "描述这张图"}]}],
+  "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+图片预处理依赖 `pillow`（不需要 torchvision）；图片请求要求关闭前缀缓存（Qwen3.5 混合模型本来就关闭）。
+
 在四张 RTX 4090 上运行 `Qwen3.6-35B-A3B-FP8`（每 rank 约 10 GiB 权重；2 个 KV 头按
 GQA 分组复制到 4 个 rank；MoE 的 CUDA Graph 需要 `triton_grouped`）。上机前可以先离线
 确认 checkpoint 布局，这一步只读取 SafeTensors 头部，不下载权重：
@@ -198,6 +215,6 @@ assignments，并将 gate/up GEMM 与 SwiGLU 融合，不再填充到最忙 expe
 - Qwen3.5/3.6 混合模型暂时关闭 radix 前缀复用（DeltaNet 状态无法从 K/V 页恢复）；
   MTP 每轮只起草一条链（无草稿树）；FP8 为 W8A16，未使用 FP8 tensor core；
 - `Qwen3.6-35B-A3B-FP8` 只完成离线布局校验，四卡 token oracle 与性能尚未实测；
-- 只关注文本生成，不覆盖视觉输入、LoRA 和复杂 grammar。
+- 图片输入只在 Qwen3.5-0.8B 上验收（35B 的视觉塔未实测），不支持视频；不覆盖 LoRA 和复杂 grammar。
 
 这些限制属于明确的后续工作，不应被当前 reference 路径的正确性掩盖。

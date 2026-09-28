@@ -45,6 +45,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
+from mysglang.config import ModelConfig
 from mysglang.modeling import (
     FlashAttentionBackend,
     Qwen3ForCausalLM,
@@ -52,6 +53,7 @@ from mysglang.modeling import (
     TorchAttentionBackend,
 )
 from mysglang.modeling.deltanet import LINEAR_ATTENTION_BACKENDS
+from mysglang.multimodal import ImageProcessor
 from mysglang.scheduler import SchedulerConfig, TensorParallelScheduler
 from mysglang.serving import GenerationService
 from mysglang.serving.parsers import ReasoningParser
@@ -125,6 +127,18 @@ def _parser() -> argparse.ArgumentParser:
         help="load an FP8 checkpoint as --dtype weights (numerical reference path)",
     )
     parser.add_argument("--presence-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--vision",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="load the vision tower for image input (default: when the checkpoint has one)",
+    )
+    parser.add_argument(
+        "--image",
+        action="append",
+        default=[],
+        help="image path/URL attached to --prompt (repeatable); in the REPL use /image PATH",
+    )
     parser.add_argument(
         "--tensor-parallel-size",
         type=int,
@@ -235,6 +249,23 @@ def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
     )
 
 
+def _vision_enabled(args: argparse.Namespace, model_path: Path) -> bool:
+    has_vision = ModelConfig.from_pretrained(model_path).vision is not None
+    if getattr(args, "vision", None) is None:
+        return has_vision
+    if args.vision and not has_vision:
+        raise ValueError("--vision requested but the checkpoint has no vision tower")
+    return args.vision
+
+
+def _user_message(text: str, images: Sequence[str]) -> dict:
+    if not images:
+        return {"role": "user", "content": text}
+    parts: list[dict] = [{"type": "image", "image": image} for image in images]
+    parts.append({"type": "text", "text": text})
+    return {"role": "user", "content": parts}
+
+
 def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
     model_path = args.model.expanduser().resolve()
     if not model_path.is_dir():
@@ -290,6 +321,7 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         linear_attention_backend=args.linear_attention_backend,
         enable_mtp=args.speculative_mtp_steps > 0,
         fp8_weights=not args.dequantize_fp8,
+        enable_vision=_vision_enabled(args, model_path),
     )
     scheduler_config = _scheduler_config(args, backend)
     if tensor_parallel.enabled:
@@ -314,6 +346,11 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         tokenizer,
         scheduler_config,
         scheduler=scheduler,
+        image_processor=(
+            None
+            if model.visual is None
+            else ImageProcessor.from_pretrained(model_path, model.config.vision)
+        ),
     )
     return _LoadedRuntime(service, scheduler, owns_process_group)
 
@@ -360,11 +397,12 @@ async def _run_driver(service: GenerationService, args: argparse.Namespace) -> N
         messages.append({"role": "system", "content": args.system})
 
     if args.prompt is not None:
-        messages.append({"role": "user", "content": args.prompt})
+        messages.append(_user_message(args.prompt, args.image))
         await _generate(service, messages, args)
         return
 
-    print("Ready. 输入 /reset 清空对话，/exit 退出。")
+    pending_images: list[str] = list(args.image)
+    print("Ready. 输入 /reset 清空对话，/image PATH 给下一句附图，/exit 退出。")
     while True:
         try:
             prompt = input("你> ")
@@ -376,12 +414,18 @@ async def _run_driver(service: GenerationService, args: argparse.Namespace) -> N
             return
         if command == "/reset":
             messages = [{"role": "system", "content": args.system}] if args.system else []
+            pending_images.clear()
             print("对话已清空。")
+            continue
+        if command.startswith("/image "):
+            pending_images.append(prompt.strip()[len("/image ") :].strip())
+            print(f"已附加图片（共 {len(pending_images)} 张），将随下一句发送。")
             continue
         if not prompt.strip():
             continue
 
-        messages.append({"role": "user", "content": prompt})
+        messages.append(_user_message(prompt, pending_images))
+        pending_images = []
         try:
             answer = await _generate(service, messages, args)
         except (RuntimeError, ValueError) as exc:

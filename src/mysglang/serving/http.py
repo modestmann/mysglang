@@ -36,7 +36,7 @@ class GenerateRequest(BaseModel):
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    # 字符串或 OpenAI content parts；当前只做纯文本，图片/视频会被明确拒绝。
+    # 字符串或 OpenAI content parts：text 与 image_url（data URL / http(s) / 本地路径）。
     content: str | list[dict[str, Any]] | None = None
     reasoning_content: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -44,16 +44,9 @@ class ChatMessage(BaseModel):
     name: str | None = None
 
     def to_template(self) -> dict[str, Any]:
+        # content parts（文本与 image_url）原样交给服务层拆分图片。
         message = self.model_dump(exclude_none=True)
-        content = self.content
-        if isinstance(content, list):
-            texts = []
-            for part in content:
-                if part.get("type", "text") != "text" or "text" not in part:
-                    raise ValueError("only text content parts are supported (text-only model)")
-                texts.append(part["text"])
-            message["content"] = "".join(texts)
-        elif content is None:
+        if self.content is None:
             message["content"] = ""
         for call in message.get("tool_calls", ()):
             # 历史里的 OpenAI arguments 是 JSON 字符串；模板需要逐参数展开的 dict。

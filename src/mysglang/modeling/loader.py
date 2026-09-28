@@ -82,6 +82,7 @@ def load_qwen3_model(
     linear_attention_backend: str = "auto",
     enable_mtp: bool = False,
     fp8_weights: bool = True,
+    enable_vision: bool = False,
 ):
     from .qwen3 import Qwen3ForCausalLM
 
@@ -100,6 +101,7 @@ def load_qwen3_model(
             linear_attention_backend=linear_attention_backend,
             enable_mtp=enable_mtp,
             fp8_weights=fp8_weights,
+            enable_vision=enable_vision,
         )
     cast_unquantized_parameters(model, parameter_dtype)
     model.to_empty(device=device)
@@ -281,7 +283,10 @@ class _ParameterIndex:
 def _normalize_checkpoint_name(model, source_name: str) -> str | None:
     """Map HF names to this model's parameter namespace, or None for ignored tensors."""
     if source_name.startswith(("model.visual.", "visual.")):
-        return None  # 纯文本推理不加载视觉塔。
+        # 未启用视觉输入时不加载视觉塔；启用时它在所有 TP rank 上复制。
+        if model.visual is None:
+            return None
+        return "visual." + source_name.split("visual.", 1)[1]
     if source_name.startswith("mtp."):
         return source_name if model.mtp is not None else None
     for prefix in ("model.language_model.", "language_model.model.", "model."):

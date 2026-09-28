@@ -3,6 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mysglang.multimodal import MultimodalInputs
 
 
 class RequestState(str, Enum):
@@ -135,6 +139,8 @@ class Request:
     request_id: str
     prompt_token_ids: tuple[int, ...]
     sampling_params: SamplingParams
+    # 图片输入（像素、网格与 M-RoPE 位置）；纯文本请求为 None。
+    multimodal: MultimodalInputs | None = None
     _state: RequestState = field(default=RequestState.WAITING, init=False, repr=False)
     _output_token_ids: list[int] = field(default_factory=list, init=False, repr=False)
 
@@ -142,6 +148,14 @@ class Request:
         if not isinstance(self.request_id, str) or not self.request_id:
             raise ValueError("request_id must not be empty")
         self.prompt_token_ids = _validate_prompt(self.prompt_token_ids)
+        if self.multimodal is not None:
+            if self.multimodal.mrope_positions.shape != (3, len(self.prompt_token_ids)):
+                raise ValueError("multimodal positions must cover every prompt token")
+            if any(
+                self.prompt_token_ids[index] != self.multimodal.image_token_id
+                for index in self.multimodal.image_token_positions
+            ):
+                raise ValueError("image token positions disagree with the prompt")
 
     # 额外的构造函数：把外部的 token iterable 规范化后包装成请求。
     @classmethod
@@ -150,8 +164,9 @@ class Request:
         request_id: str,
         prompt_token_ids: Iterable[int],
         sampling_params: SamplingParams,
+        multimodal: MultimodalInputs | None = None,
     ) -> Request:
-        return cls(request_id, tuple(prompt_token_ids), sampling_params)
+        return cls(request_id, tuple(prompt_token_ids), sampling_params, multimodal)
 
     @property
     def state(self) -> RequestState:

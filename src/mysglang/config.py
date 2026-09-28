@@ -72,6 +72,49 @@ def _normalize_hf_module_name(name: str) -> str:
 
 
 @dataclass(frozen=True)
+class VisionConfig:
+    """Qwen3.5 vision tower (ViT + 2x2 patch merger) and its image-token IDs."""
+
+    depth: int = 12
+    hidden_size: int = 768
+    intermediate_size: int = 3072
+    num_heads: int = 12
+    out_hidden_size: int = 1024
+    patch_size: int = 16
+    temporal_patch_size: int = 2
+    spatial_merge_size: int = 2
+    in_channels: int = 3
+    num_position_embeddings: int = 2304
+    hidden_act: str = "gelu_pytorch_tanh"
+    image_token_id: int = 248056
+    vision_start_token_id: int = 248053
+    vision_end_token_id: int = 248054
+
+    def __post_init__(self) -> None:
+        if self.hidden_size % self.num_heads:
+            raise ValueError("vision hidden_size must be divisible by num_heads")
+        if self.hidden_act != "gelu_pytorch_tanh":
+            raise ValueError("only the Qwen3.5 gelu_pytorch_tanh vision MLP is implemented")
+        side = int(self.num_position_embeddings**0.5)
+        if side * side != self.num_position_embeddings:
+            raise ValueError("vision position embeddings must form a square grid")
+
+    @property
+    def patch_dim(self) -> int:
+        return self.in_channels * self.temporal_patch_size * self.patch_size**2
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any], outer: dict[str, Any]) -> VisionConfig:
+        if raw.get("deepstack_visual_indexes"):
+            raise ValueError("deepstack vision features are not implemented")
+        fields = {name: raw[name] for name in cls.__dataclass_fields__ if name in raw}
+        for name in ("image_token_id", "vision_start_token_id", "vision_end_token_id"):
+            if name in outer:
+                fields[name] = outer[name]
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     """Qwen3 / Qwen3MoE / Qwen3.5 hybrid architecture, independent of serving limits."""
 
@@ -116,8 +159,11 @@ class ModelConfig:
     linear_num_key_heads: int = 0
     linear_num_value_heads: int = 0
     mtp_num_hidden_layers: int = 0
+    # 交错 M-RoPE：旋转频率按 [t, h, w, t, h, w, ...] 分给三个位置轴；纯文本三轴相同。
+    mrope_section: tuple[int, ...] = ()
 
     quantization: Fp8QuantConfig | None = field(default=None, compare=False)
+    vision: VisionConfig | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.model_type not in {"qwen3", "qwen3_moe", "qwen3_5", "qwen3_5_moe"}:
@@ -177,6 +223,11 @@ class ModelConfig:
             raise ValueError("at least one full-attention layer is required")
         if self.mtp_num_hidden_layers < 0:
             raise ValueError("mtp_num_hidden_layers must be non-negative")
+        object.__setattr__(self, "mrope_section", tuple(self.mrope_section))
+        if self.mrope_section and sum(self.mrope_section) != self.rotary_dim // 2:
+            raise ValueError("mrope_section must cover every rotary frequency")
+        if self.vision is not None and not (self.is_qwen3_5 and self.mrope_section):
+            raise ValueError("vision input requires a Qwen3.5 model with M-RoPE")
 
         if not self.is_qwen3_5:
             if self.has_linear_attention or self.attn_output_gate or self.mtp_num_hidden_layers:
@@ -291,6 +342,10 @@ class ModelConfig:
         eos_ids = list(dict.fromkeys(eos_ids))
 
         quantization = outer.get("quantization_config") or raw.get("quantization_config")
+        vision = outer.get("vision_config")
+        mrope = rope.get("mrope_section") if isinstance(rope, dict) else None
+        if mrope and not rope.get("mrope_interleaved", False):
+            raise ValueError("only interleaved M-RoPE is implemented")
         partial_rotary = raw.get("partial_rotary_factor", rope.get("partial_rotary_factor", 1.0))
         moe_intermediate = raw.get("moe_intermediate_size", 0)
         return cls(
@@ -333,7 +388,9 @@ class ModelConfig:
             linear_num_key_heads=raw.get("linear_num_key_heads", 0),
             linear_num_value_heads=raw.get("linear_num_value_heads", 0),
             mtp_num_hidden_layers=raw.get("mtp_num_hidden_layers", 0),
+            mrope_section=tuple(mrope or ()),
             quantization=Fp8QuantConfig.from_dict(quantization) if quantization else None,
+            vision=VisionConfig.from_dict(vision, outer) if vision else None,
         )
 
 

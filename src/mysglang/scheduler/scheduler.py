@@ -24,8 +24,9 @@ tp_scheduler.run_worker_loop()
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -92,6 +93,8 @@ class _Entry:
     mtp_hidden: torch.Tensor | None = None
     # 随机采样请求的草稿分布 q；None 表示确定性草稿（greedy argmax 或 n-gram）。
     mtp_draft_prob: torch.Tensor | None = None
+    # 图片请求的视觉特征（每个图片占位 token 一行），首次 Prefill 时编码，Prompt 完成后释放。
+    vision_features: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +308,12 @@ class Scheduler:
         needed_pages = self.cache.allocator.pages_for_tokens(total_length)
         if needed_pages > self.cache.num_pages:
             raise ValueError("request exceeds total paged KV cache capacity")
+        if request.multimodal is not None:
+            if self.model.visual is None:
+                raise ValueError("image input requires a model loaded with enable_vision")
+            if self.cache.enable_prefix_cache:
+                # 图片占位 token 的 ID 都相同，按 token 前缀复用会把不同图片的 K/V 混用。
+                raise ValueError("image input requires prefix caching to be disabled")
 
     def add(self, request: Request) -> None:
         self.validate(request)
@@ -418,9 +427,9 @@ class Scheduler:
         request_ids = decode_ids + tuple(entry.request.request_id for entry, _, _ in chunks)
         append_lengths = (1,) * len(decoding) + tuple(end - start for _, start, end in chunks)
         packed_tokens = [entry.request.last_output_token_id for entry in decoding]
-        if decoding:
-            for request_id, length in zip(decode_ids, self.cache.lengths(decode_ids)):
-                self.cache.ensure_capacity(request_id, length + 1)
+        decode_starts = self.cache.lengths(decode_ids) if decoding else ()
+        for request_id, length in zip(decode_ids, decode_starts):
+            self.cache.ensure_capacity(request_id, length + 1)
         for entry, start, end in chunks:
             request_id = entry.request.request_id
             # reservation 是容量承诺；这里才从 free pages 取物理页并写入请求页表。
@@ -448,6 +457,8 @@ class Scheduler:
             append_lengths=append_lengths,
             logits_indices=tuple(logits_indices),
         )
+        rows = [(entry, start, 1) for entry, start in zip(decoding, decode_starts)]
+        rows.extend((entry, start, end - start) for entry, start, end in chunks)
         logits, hidden = self._split_hidden(
             self.model.forward_packed(
                 input_ids,
@@ -456,6 +467,8 @@ class Scheduler:
                 append_lengths=append_lengths,
                 logits_indices=tuple(logits_indices),
                 return_hidden=bool(self._mtp_steps),
+                mrope_positions=self._mrope_positions(rows),
+                embedding_overrides=self._vision_overrides(rows),
             )
         )
         self._model_forwards += 1
@@ -501,6 +514,9 @@ class Scheduler:
                 )
                 row += end - start
             self._mtp_catch_up(segments, hidden)
+        for entry, _start, end in chunks:
+            if end == len(entry.request.prompt_token_ids):
+                entry.vision_features = None
 
         outputs = []
         for entry, next_token in zip(decoding, next_token_ids[: len(decoding)]):
@@ -596,7 +612,9 @@ class Scheduler:
         hidden = None
         if use_cuda_graph:
             # 满足固定 Decode bucket 条件后，从这里进入 Graph replay。
-            graph_result = self._cuda_graph_runner.run_positions(input_token_ids, request_ids)
+            graph_result = self._cuda_graph_runner.run_positions(
+                input_token_ids, request_ids, rope_deltas=self._rope_deltas(entries)
+            )
             hidden = graph_result.hidden
             # 图内已算好 argmax；需要采样或 penalty 的请求改读图输出的 logits。
             next_token_ids = tuple(
@@ -618,7 +636,9 @@ class Scheduler:
                     max_blocks=self._decode_max_blocks,
                 )
                 self._decode_buffers[len(entries)] = buffer
-            batch = self.cache.prepare_decode_batch(request_ids, buffer)
+            batch = self.cache.prepare_decode_batch(
+                request_ids, buffer, rope_deltas=self._rope_deltas(entries)
+            )
             logits, hidden = self._split_hidden(
                 self.model.forward_prepared(
                     input_ids,
@@ -700,7 +720,7 @@ class Scheduler:
         if use_graph:
             # 所有请求都是满额 greedy 草稿：[batch, 1 + k] 形状固定，直接 replay。
             graph_result = self._verify_graph_runner.run_positions(
-                tuple(packed_tokens), request_ids
+                tuple(packed_tokens), request_ids, rope_deltas=self._rope_deltas(entries)
             )
             greedy_rows = graph_result.token_ids
             hidden = graph_result.hidden
@@ -723,6 +743,9 @@ class Scheduler:
                     logits_indices=None,
                     state_batch=state_batch,
                     return_hidden=bool(self._mtp_steps),
+                    mrope_positions=self._mrope_positions(
+                        list(zip(entries, starts, append_lengths))
+                    ),
                 )
             )
 
@@ -900,11 +923,25 @@ class Scheduler:
                 and len(active) == len(entries)
                 and self._mtp_draft_graph.supports(len(active))
             ):
-                result = self._mtp_draft_graph.run_positions(tokens, active_ids, step_hidden)
+                result = self._mtp_draft_graph.run_positions(
+                    tokens,
+                    active_ids,
+                    step_hidden,
+                    rope_deltas=self._rope_deltas([entries[index] for index in active]),
+                )
                 step_logits = result.logits[:, -1]
                 draft_hidden = result.hidden
             else:
                 batch = draft_cache.prepare_batch(active_ids, (1,) * len(active))
+                batch = replace(
+                    batch,
+                    mrope_positions=self._mrope_positions(
+                        [
+                            (entries[index], start, 1)
+                            for index, start in zip(active, batch.starts)
+                        ]
+                    ),
+                )
                 logits, draft_hidden = self.model.forward_mtp(
                     torch.tensor(tokens, dtype=torch.long, device=self._device).view(-1, 1),
                     step_hidden,
@@ -960,12 +997,19 @@ class Scheduler:
             cache=draft_cache,
         )
         batch = draft_cache.prepare_batch(request_ids, append_lengths)
+        spans = [
+            (segment.entry, start, len(segment.tokens))
+            for segment, start in zip(segments, batch.starts)
+        ]
+        batch = replace(batch, mrope_positions=self._mrope_positions(spans))
         logits, mtp_hidden = self.model.forward_mtp(
             torch.tensor(tokens, dtype=torch.long, device=self._device),
             flat_hidden.index_select(0, torch.tensor(rows, device=flat_hidden.device)),
             kv_cache=draft_cache,
             cache_batch=batch,
             logits_indices=tuple(logits_indices),
+            # 行 p 的输入 token 是 t_{p+1}；它若是图片占位符，同样换成视觉特征。
+            embedding_overrides=self._vision_overrides(spans, shift=1),
         )
         self._speculative_draft_forwards += 1
         drafting = [segment for segment in segments if segment.needs_draft]
@@ -1008,7 +1052,9 @@ class Scheduler:
             logits_indices=None,
             cache=self._draft_cache,
         )
-        result = self._mtp_catch_up_graph.run_positions(tokens, request_ids, target_hidden)
+        result = self._mtp_catch_up_graph.run_positions(
+            tokens, request_ids, target_hidden, rope_deltas=self._rope_deltas(entries)
+        )
         self._speculative_draft_forwards += 1
         proposals = [
             (row[len(output) - 1], None)
@@ -1024,6 +1070,61 @@ class Scheduler:
             entry.mtp_draft = token
             entry.mtp_draft_prob = proposals[index][1]
             entry.mtp_hidden = result.hidden[index, len(output) - 1].clone()
+
+    @staticmethod
+    def _rope_delta(entry: _Entry) -> int:
+        multimodal = entry.request.multimodal
+        return 0 if multimodal is None else multimodal.rope_delta
+
+    def _rope_deltas(self, entries) -> tuple[int, ...]:
+        return tuple(self._rope_delta(entry) for entry in entries)
+
+    def _mrope_positions(self, rows) -> torch.Tensor | None:
+        """``[3, tokens]`` RoPE positions when any row belongs to an image request.
+
+        Prompt rows of an image request use its precomputed (t, h, w) positions; every
+        other row uses its K/V index plus the request's ``rope_delta`` on all three axes.
+        """
+        if not any(entry.request.multimodal is not None for entry, _, _ in rows):
+            return None
+        parts = []
+        for entry, start, length in rows:
+            multimodal = entry.request.multimodal
+            if multimodal is not None and start < len(entry.request.prompt_token_ids):
+                parts.append(multimodal.mrope_positions[:, start : start + length])
+            else:
+                linear = torch.arange(start, start + length) + self._rope_delta(entry)
+                parts.append(linear.expand(3, -1))
+        return torch.cat(parts, dim=1).to(self._device)
+
+    def _vision_overrides(self, rows, *, shift: int = 0):
+        """Rows whose input token (prompt position ``start + i + shift``) is an image token."""
+        row_indices: list[int] = []
+        features: list[torch.Tensor] = []
+        offset = 0
+        for entry, start, length in rows:
+            multimodal = entry.request.multimodal
+            if multimodal is not None and multimodal.num_image_tokens:
+                positions = multimodal.image_token_positions
+                first = bisect_left(positions, start + shift)
+                last = bisect_left(positions, start + shift + length)
+                if first < last:
+                    if entry.vision_features is None:
+                        # 整个请求的图片只编码一次；后续 chunk 与 MTP 追赶复用。
+                        entry.vision_features = self.model.encode_images(
+                            multimodal.pixel_values, multimodal.image_grid_thw
+                        )
+                    row_indices.extend(
+                        offset + positions[index] - start - shift for index in range(first, last)
+                    )
+                    features.append(entry.vision_features[first:last])
+            offset += length
+        if not row_indices:
+            return None
+        return (
+            torch.tensor(row_indices, dtype=torch.long, device=self._device),
+            torch.cat(features),
+        )
 
     @staticmethod
     def _accept_greedy(draft: tuple[int, ...], target_tokens: tuple[int, ...]) -> tuple[int, ...]:
@@ -1092,6 +1193,7 @@ class Scheduler:
         entry.mtp_draft = None
         entry.mtp_hidden = None
         entry.mtp_draft_prob = None
+        entry.vision_features = None
         if request_id in self.cache.allocator.request_ids:
             if finished:
                 self.cache.finish_request(request_id, request.all_token_ids)

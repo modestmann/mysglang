@@ -619,11 +619,39 @@ MTP 在位置 `p` 的输入是 `fc([norm(embed(t_{p+1})), norm(h_p)])`，`h_p` �
 
 `benchmarks/validate_checkpoint_layout.py` 只通过 HTTP Range 读取 SafeTensors 头部，在 meta device 上为每个 TP rank 构造模型并走真实 loader 映射。对 35B-A3B-FP8：64196 个张量在 TP=4 每个 rank 上全部映射成功、参数恰好覆盖，忽略的 333 个是视觉塔；每 rank 权重（含 MTP）约 9.98 GiB。
 
+### 图片输入（已在 Qwen3.5-0.8B 验收）
+
+```text
+OpenAI content parts ──_split_images──> 模板里的 {"type": "image"} + 图片源（按出现顺序）
+  └─ chat template：每张图渲染为 <|vision_start|><|image_pad|><|vision_end|>
+ImageProcessor（multimodal.py）：
+  PIL BICUBIC 缩放到 32 的倍数且像素数在 [min, max] 内 → /255 → 归一化
+  → 16×16 patch，按 2×2 合并块排序，时间维复制 2 份 → [num_patches, 1536]
+  → 每个 <|image_pad|> 展开成 t·h·w/4 个占位 token
+  → M-RoPE 三轴位置与 rope_delta
+Scheduler：首个 Prefill chunk 时 encode_images（ViT + 合并器）一次，缓存到 entry；
+  每个 chunk 用 index_copy 把本 chunk 内占位 token 的 embedding 换成对应特征行；
+  Prompt 完成后释放特征
+```
+
+**M-RoPE 位置与 K/V 下标分离。** 文本 token 三轴位置相同；图片 token 在它的合并网格上取 `(t, 行, 列) + 起点`，之后的文本从 `起点 + max(h, w)` 继续，而不是 `起点 + h·w`。因此图片 prompt 中 RoPE 位置小于 K/V 下标，差值记为 `rope_delta = max_position + 1 − prompt_len`（通常为负）。实现上：
+
+- K/V 页寻址、slot mapping、长度仍然只看 K/V 下标；
+- `PagedKVBatch.mrope_positions`（`[3, tokens]`）只在 batch 里有图片请求时构造：prompt 行取预计算的三轴位置，其余行（decode、verify、别的请求）取 `K/V 下标 + rope_delta` 三轴相同；
+- 纯 Decode 的 decode buffer 多一个固定地址的 `rope_positions = K/V 下标 + rope_delta`，CUDA Graph 每轮只改内容；纯文本请求的 delta 为 0，数值与原来逐位相同；
+- MTP 的草稿与追赶使用与目标完全相同的 RoPE 位置；追赶行 p 的输入 token 是 t_{p+1}，若它是图片占位符，同样换成视觉特征。
+
+**为什么必须关前缀缓存。** 所有图片的占位 token ID 都相同，按 token 前缀复用会让不同图片共享 K/V。混合模型本来就关闭了 radix 复用；`Scheduler.validate` 对开启前缀缓存的 cache 直接拒绝图片请求。以后若要复用，前缀 key 必须加入图片内容哈希。
+
+**视觉塔**（`modeling/vision.py`）：patch embedding 的 Conv3d 的 kernel 等于 stride，实现为展平 patch 上的一次 `F.linear`；48×48 的可学习位置表按 align_corners 双线性插值到每张图的网格；(行, 列) 二维 rotary 在 float32 中施加；每帧单独做非因果注意力；2×2 合并器把相邻 4 个 patch 拼接后投影到 LLM 维度。TP 下视觉塔在每个 rank 复制，各 rank 独立编码（输入相同，结果一致）。
+
+验收：预处理与 HF `Qwen2VLImageProcessorPil` 逐位一致；视觉塔与 HF 在 fp32 下误差 5.5e-5；小模型（两张图）logits 与 HF `Qwen3_5ForConditionalGeneration` 对齐；真实 0.8B fp32 下，经 tokenizer → 预处理 → chunked prefill（图片被切开）→ MTP k=2 的完整服务路径，40 个 greedy token 与 HF 逐个一致；TP=2 与 TP=1 一致；图片请求的 Graph 与 eager 一致。
+
 ### 接口
 
 - 停止 token 取 generation_config 与 tokenizer 的并集（Qwen 需要同时停在 `<|im_end|>` 和 `<|endoftext|>`）；
 - `presence_penalty` / `frequency_penalty` 只统计已生成 token（OpenAI 语义）；
-- `/v1/chat/completions`：thinking 模式下模板已以 `<think>\n` 结尾，输出在 `</think>` 前的部分进入 `reasoning_content`；`tools` 按 `qwen3_coder` XML 格式解析为 `tool_calls`（参数按 JSON schema 类型转换），流式时工具调用在最后一个 chunk 给出；`chat_template_kwargs` 透传给模板（如 `enable_thinking`、`preserve_thinking`）；只支持纯文本，图片/视频输入返回 400；
+- `/v1/chat/completions`：thinking 模式下模板已以 `<think>\n` 结尾，输出在 `</think>` 前的部分进入 `reasoning_content`；`tools` 按 `qwen3_coder` XML 格式解析为 `tool_calls`（参数按 JSON schema 类型转换），流式时工具调用在最后一个 chunk 给出；`chat_template_kwargs` 透传给模板（如 `enable_thinking`、`preserve_thinking`）；`image_url`（data URL、http(s)、本地路径）作为图片输入，视频返回 400；
 - `python -m mysglang.server` 提供 OpenAI 兼容服务，TP 时只有 rank 0 监听。
 
 ## 9. 与 Mini-SGLang 的关系
@@ -659,7 +687,8 @@ MTP 在位置 `p` 的输入是 `fc([norm(embed(t_{p+1})), norm(h_p)])`，`h_p` �
   grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
   vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测；
-- Qwen3.5/3.6 混合模型关闭 radix 前缀复用（递归状态无法从页面恢复）；只做纯文本，视觉塔不加载；
+- Qwen3.5/3.6 混合模型关闭 radix 前缀复用（递归状态无法从页面恢复）；
+- 图片输入只在 Qwen3.5-0.8B 上验收，35B 的视觉塔（27 层）尚未实测；不支持视频；视觉编码在调度 worker 中同步执行，没有独立的编码 batch；
 - MTP 每步只起草一条链（topk=1），尚未实现草稿树；
 - FP8 为 W8A16（权重 1 字节，激活仍为 BF16），尚未使用 Ada/Hopper 的 FP8 tensor core；
 - 真实 Qwen3.6-35B-A3B-FP8 只完成了离线布局校验，TP=4 的 token oracle、显存与性能仍需在 4×RTX 4090 上实测。

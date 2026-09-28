@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from mysglang.core import FinishReason, IncrementalOutput, Request, SamplingParams
 from mysglang.modeling.qwen3 import Qwen3ForCausalLM
+from mysglang.multimodal import ImageProcessor, MultimodalInputs, build_multimodal_inputs
 from mysglang.scheduler import (
     Scheduler,
     SchedulerConfig,
@@ -78,11 +79,14 @@ class GenerationService:
         scheduler_config: SchedulerConfig,
         *,
         scheduler: Scheduler | TensorParallelScheduler | None = None,
+        image_processor: ImageProcessor | None = None,
     ) -> None:
         if model.config.vocab_size < tokenizer.vocab_size:
             raise ValueError("model vocab_size is smaller than the tokenizer ID space")
         self.model = model
         self.tokenizer = tokenizer
+        # 只有加载了视觉塔的模型才接受图片；预处理在 rank 0 的服务进程里完成。
+        self.image_processor = image_processor
         # TP 时由 rank 0 注入分布式 facade；单卡仍沿用本地 Scheduler。
         self.scheduler = scheduler or Scheduler(model, scheduler_config)
         # generation_config 与 tokenizer 各自声明的结束 token 都要生效（如 Qwen 的
@@ -161,14 +165,23 @@ class GenerationService:
         tools: Sequence[Mapping[str, Any]] | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> GenerationSession:
+        template_messages, images = _split_images(messages)
         prompt_token_ids = tuple(
             self.tokenizer.apply_chat_template(
-                messages,
+                template_messages,
                 enable_thinking=enable_thinking,
                 tools=tools,
                 **dict(chat_template_kwargs or {}),
             )
         )
+        multimodal = None
+        if images:
+            if self.image_processor is None:
+                raise ValueError("this model was loaded without image input support")
+            expanded, multimodal = build_multimodal_inputs(
+                prompt_token_ids, images, self.image_processor
+            )
+            prompt_token_ids = tuple(expanded)
         return self._start_token_ids(
             prompt_token_ids,
             max_new_tokens=max_new_tokens,
@@ -180,6 +193,7 @@ class GenerationService:
             seed=seed,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
+            multimodal=multimodal,
         )
 
     def _start_token_ids(
@@ -195,6 +209,7 @@ class GenerationService:
         seed: int | None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
+        multimodal: MultimodalInputs | None = None,
     ) -> GenerationSession:
         # 显式指定 eos_token_id 时只在它处停止；否则使用模型与 tokenizer 的全部结束 token。
         request = Request.from_token_ids(
@@ -214,6 +229,7 @@ class GenerationService:
                 presence_penalty=presence_penalty,
                 frequency_penalty=frequency_penalty,
             ),
+            multimodal,
         )
         self.scheduler.validate(request)
         return GenerationSession(self, request, len(prompt_token_ids))
@@ -283,3 +299,43 @@ class GenerationService:
             if not session.request.is_terminal:
                 await self.abort(request_id)
             self._queues.pop(request_id, None)
+
+
+def _split_images(
+    messages: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """OpenAI content parts -> template messages with ``{"type": "image"}`` placeholders.
+
+    Images are returned in prompt order; a message without images keeps plain string
+    content so templates that only understand text keep working.
+    """
+    template_messages: list[dict[str, Any]] = []
+    images: list[Any] = []
+    for message in messages:
+        message = dict(message)
+        content = message.get("content")
+        if isinstance(content, list):
+            parts: list[dict[str, Any]] = []
+            has_image = False
+            for part in content:
+                kind = part.get("type", "text")
+                if kind == "text":
+                    parts.append({"type": "text", "text": part.get("text", "")})
+                elif kind in {"image_url", "image"}:
+                    source = part.get("image_url", part.get("image"))
+                    if isinstance(source, Mapping):
+                        source = source.get("url")
+                    if not source:
+                        raise ValueError("image content part has no image")
+                    images.append(source)
+                    parts.append({"type": "image"})
+                    has_image = True
+                else:
+                    raise ValueError(
+                        f"unsupported content part type: {kind} (text and images only)"
+                    )
+            message["content"] = (
+                parts if has_image else "".join(part["text"] for part in parts)
+            )
+        template_messages.append(message)
+    return template_messages, images

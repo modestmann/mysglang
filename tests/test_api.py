@@ -188,7 +188,14 @@ class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(image.status_code, 400)
-        self.assertIn("text-only", image.json()["detail"])
+        self.assertIn("image input", image.json()["detail"])
+
+        video = await self.client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": [{"type": "video", "video": "x"}]}]},
+        )
+        self.assertEqual(video.status_code, 400)
+        self.assertIn("video", video.json()["detail"])
 
 
 if __name__ == "__main__":

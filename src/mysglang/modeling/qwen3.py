@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -19,6 +20,7 @@ from .attention import AttentionBackend, TorchAttentionBackend
 from .deltanet import Qwen3_5GatedDeltaNet
 from .fp8 import FP8_DTYPE, ceil_div, dequantize_block_fp8, quantize_block_fp8
 from .parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelContext
+from .vision import Qwen3_5VisionModel
 
 
 class RMSNorm(nn.Module):
@@ -47,15 +49,24 @@ class RotaryEmbedding(nn.Module):
     """Default RoPE on the first ``rotary_dim`` channels of each head.
 
     Qwen3 rotates the whole head. Qwen3.5 rotates only 25% of it (64 of 256 channels)
-    and leaves the rest position-free. Its interleaved M-RoPE uses the same position for
-    the temporal/height/width sections of text tokens, which reduces to this 1-D RoPE.
+    and leaves the rest position-free. Its interleaved M-RoPE assigns the rotary
+    frequencies to (t, h, w) position axes as ``[t, h, w, t, h, w, ...]``; text tokens use
+    the same position on all axes, which reduces exactly to this 1-D RoPE, so only image
+    prompts pass separate ``mrope_positions``.
     """
 
-    def __init__(self, head_dim: int, theta: float, rotary_dim: int | None = None) -> None:
+    def __init__(
+        self,
+        head_dim: int,
+        theta: float,
+        rotary_dim: int | None = None,
+        mrope_section: tuple[int, ...] = (),
+    ) -> None:
         super().__init__()
         self.head_dim = head_dim
         self.rotary_dim = head_dim if rotary_dim is None else rotary_dim
         self.theta = theta
+        self.mrope_section = mrope_section
         self.register_buffer("inv_freq", self._make_inv_freq(), persistent=False)
 
     def _make_inv_freq(self, device: torch.device | str | None = None) -> torch.Tensor:
@@ -67,13 +78,32 @@ class RotaryEmbedding(nn.Module):
         # checkpoint, while this deterministic non-persistent RoPE buffer is rebuilt here.
         self.inv_freq = self._make_inv_freq(device)
 
+    def _frequencies(
+        self,
+        positions: torch.Tensor,
+        mrope_positions: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if mrope_positions is None:
+            return positions.float().unsqueeze(-1) * self.inv_freq.float()
+        if not self.mrope_section:
+            raise ValueError("this model has no M-RoPE sections")
+        # [3, ..., rotary/2]：t 轴为底，h/w 轴按交错下标覆盖对应频率。
+        axes = mrope_positions.float().unsqueeze(-1) * self.inv_freq.float()
+        frequencies = axes[0].clone()
+        for axis in (1, 2):
+            index = slice(axis, 3 * self.mrope_section[axis], 3)
+            frequencies[..., index] = axes[axis][..., index]
+        return frequencies
+
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         positions: torch.Tensor,
+        mrope_positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        frequencies = positions.float().unsqueeze(-1) * self.inv_freq.float()
+        frequencies = self._frequencies(positions, mrope_positions)
+        positions = frequencies[..., 0]
         embeddings = torch.cat((frequencies, frequencies), dim=-1)
         cos_values = embeddings.cos().to(dtype=query.dtype)
         sin_values = embeddings.sin().to(dtype=query.dtype)
@@ -104,6 +134,8 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 
 
 QuantizeFn = Callable[..., "Fp8QuantConfig | None"]
+# (flat token rows, replacement embeddings): image placeholders -> vision features.
+EmbeddingOverrides = tuple[torch.Tensor, torch.Tensor]
 
 
 class Qwen3Attention(nn.Module):
@@ -163,7 +195,9 @@ class Qwen3Attention(nn.Module):
         zero_centered = config.is_qwen3_5
         self.q_norm = RMSNorm(self.head_dim, config.rms_norm_eps, zero_centered=zero_centered)
         self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps, zero_centered=zero_centered)
-        self.rope = RotaryEmbedding(self.head_dim, config.rope_theta, config.rotary_dim)
+        self.rope = RotaryEmbedding(
+            self.head_dim, config.rope_theta, config.rotary_dim, config.mrope_section
+        )
 
     def forward(
         self,
@@ -171,6 +205,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
+        mrope_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if x.ndim not in {2, 3}:
             raise ValueError("hidden states must be dense rank 3 or packed rank 2")
@@ -189,7 +224,7 @@ class Qwen3Attention(nn.Module):
         if x.ndim == 3:
             # Dense attention uses [batch, heads, sequence, head_dim].
             query, key, value = (tensor.transpose(1, 2) for tensor in (query, key, value))
-        query, key = self.rope(query, key, positions)
+        query, key = self.rope(query, key, positions, mrope_positions)
         output = self.backend.forward(
             query,
             key,
@@ -878,13 +913,16 @@ class Qwen3DecoderLayer(nn.Module):
         kv_cache: PagedKVCache | None,
         cache_batch: PagedKVBatch | None,
         state_batch: RecurrentStateBatch | None = None,
+        mrope_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         normalized = self.input_layernorm(x)
         if self.linear_attn is not None:
             x = x + self.linear_attn(normalized, state_batch)
         else:
             assert self.self_attn is not None
-            x = x + self.self_attn(normalized, positions, kv_cache, cache_batch)
+            x = x + self.self_attn(
+                normalized, positions, kv_cache, cache_batch, mrope_positions
+            )
         return x + self.mlp(self.post_attention_layernorm(x))
 
 
@@ -944,6 +982,7 @@ class Qwen3ForCausalLM(nn.Module):
         linear_attention_backend: str = "auto",
         enable_mtp: bool = False,
         fp8_weights: bool = True,
+        enable_vision: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -994,6 +1033,10 @@ class Qwen3ForCausalLM(nn.Module):
             if enable_mtp
             else None
         )
+        if enable_vision and config.vision is None:
+            raise ValueError("this checkpoint does not contain a vision tower")
+        # 视觉塔始终以激活精度（BF16）保存；官方 FP8 checkpoint 也不量化它。
+        self.visual = Qwen3_5VisionModel(config.vision) if enable_vision else None
         self.tie_weights()
 
     def _quantize_for(self, *hf_module_names: str) -> Fp8QuantConfig | None:
@@ -1050,6 +1093,22 @@ class Qwen3ForCausalLM(nn.Module):
         for layer in self._decoder_layers():
             if layer.self_attn is not None:
                 layer.self_attn.rope.reset_buffer(device)
+        if self.visual is not None:
+            self.visual.reset_buffers(device)
+
+    @torch.no_grad()
+    def encode_images(
+        self,
+        pixel_values: torch.Tensor,
+        image_grid_thw: tuple[tuple[int, int, int], ...],
+    ) -> torch.Tensor:
+        """Vision features, one row per expanded image token, in the LLM hidden size."""
+        if self.visual is None:
+            raise RuntimeError("the model was loaded without its vision tower")
+        device = self.embed_tokens.weight.device
+        grid = torch.tensor(image_grid_thw, dtype=torch.long, device=device)
+        features = self.visual(pixel_values.to(device), grid)
+        return features.to(self.embed_tokens.weight.dtype)
 
     @classmethod
     def from_pretrained(
@@ -1064,6 +1123,7 @@ class Qwen3ForCausalLM(nn.Module):
         linear_attention_backend: str = "auto",
         enable_mtp: bool = False,
         fp8_weights: bool = True,
+        enable_vision: bool = False,
     ) -> Qwen3ForCausalLM:
         from .loader import load_qwen3_model
 
@@ -1077,6 +1137,7 @@ class Qwen3ForCausalLM(nn.Module):
             linear_attention_backend=linear_attention_backend,
             enable_mtp=enable_mtp,
             fp8_weights=fp8_weights,
+            enable_vision=enable_vision,
         )
 
     def validate_cache(self, cache: PagedKVCache) -> None:
@@ -1100,7 +1161,13 @@ class Qwen3ForCausalLM(nn.Module):
         *,
         kv_cache: PagedKVCache | None = None,
         cache_request_ids: tuple[str, ...] | None = None,
+        mrope_positions: torch.Tensor | None = None,
+        embedding_overrides: EmbeddingOverrides | None = None,
     ) -> torch.Tensor:
+        """Uncached oracle forward, or a dense cached forward over ``cache_request_ids``.
+
+        ``mrope_positions`` (``[3, batch, sequence]``) and ``embedding_overrides`` let the
+        uncached path reproduce an image prompt end to end."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
         if input_ids.size(1) == 0:
@@ -1128,7 +1195,14 @@ class Qwen3ForCausalLM(nn.Module):
 
         if max_total_length > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
-        return self._forward_tokens(input_ids, positions, kv_cache, cache_batch)
+        return self._forward_tokens(
+            input_ids,
+            positions,
+            kv_cache,
+            cache_batch,
+            mrope_positions=mrope_positions,
+            embedding_overrides=embedding_overrides,
+        )
 
     def forward_prepared(
         self,
@@ -1139,10 +1213,12 @@ class Qwen3ForCausalLM(nn.Module):
         logits_indices: tuple[int, ...] | None = None,
         state_batch: RecurrentStateBatch | None = None,
         return_hidden: bool = False,
+        embedding_overrides: EmbeddingOverrides | None = None,
     ):
         """Cached forward. ``return_hidden`` also returns every final (normed) hidden row,
         which the MTP head consumes; ``state_batch`` overrides the default slot batch,
-        e.g. to run speculative verification in log mode."""
+        e.g. to run speculative verification in log mode. ``embedding_overrides``
+        replaces image-placeholder rows with vision features."""
         positions = self._validate_prepared(input_ids, cache_batch)
         self._validate_logits_indices(logits_indices, input_ids.numel())
         if state_batch is None and self.recurrent_state_spec is not None:
@@ -1160,6 +1236,7 @@ class Qwen3ForCausalLM(nn.Module):
             logits_indices,
             state_batch=state_batch,
             return_hidden=return_hidden,
+            embedding_overrides=embedding_overrides,
         )
 
     def _validate_prepared(
@@ -1185,6 +1262,9 @@ class Qwen3ForCausalLM(nn.Module):
             raise ValueError("input token count disagrees with cache metadata")
         if cache_batch.max_end > self.config.max_position_embeddings:
             raise ValueError("sequence exceeds max_position_embeddings")
+        # 带图片的请求：RoPE 位置 = K/V 下标 + rope_delta（decode）或三维位置（prefill）。
+        if cache_batch.rope_positions is not None:
+            positions = cache_batch.rope_positions.view(positions.shape)
         return positions
 
     def forward_packed(
@@ -1197,6 +1277,8 @@ class Qwen3ForCausalLM(nn.Module):
         logits_indices: tuple[int, ...] | None = None,
         state_batch: RecurrentStateBatch | None = None,
         return_hidden: bool = False,
+        mrope_positions: torch.Tensor | None = None,
+        embedding_overrides: EmbeddingOverrides | None = None,
     ):
         if input_ids.ndim != 1:
             raise ValueError("packed input_ids must have shape [total_tokens]")
@@ -1206,6 +1288,8 @@ class Qwen3ForCausalLM(nn.Module):
             raise ValueError("request IDs and append lengths must have the same size")
         self._validate_logits_indices(logits_indices, input_ids.numel())
         cache_batch = kv_cache.prepare_batch(cache_request_ids, append_lengths)
+        if mrope_positions is not None:
+            cache_batch = replace(cache_batch, mrope_positions=mrope_positions)
         return self.forward_prepared(
             input_ids,
             kv_cache=kv_cache,
@@ -1213,6 +1297,7 @@ class Qwen3ForCausalLM(nn.Module):
             logits_indices=logits_indices,
             state_batch=state_batch,
             return_hidden=return_hidden,
+            embedding_overrides=embedding_overrides,
         )
 
     def forward_mtp(
@@ -1223,6 +1308,7 @@ class Qwen3ForCausalLM(nn.Module):
         kv_cache: PagedKVCache,
         cache_batch: PagedKVBatch,
         logits_indices: tuple[int, ...] | None = None,
+        embedding_overrides: EmbeddingOverrides | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the MTP head on packed ``(next token, target hidden)`` pairs.
 
@@ -1236,11 +1322,21 @@ class Qwen3ForCausalLM(nn.Module):
         self._validate_logits_indices(logits_indices, input_ids.numel())
         if hidden_states.shape[:-1] != input_ids.shape:
             raise ValueError("MTP hidden states must align with the input tokens")
-        embeddings = self.mtp.pre_fc_norm_embedding(self.embed_tokens(input_ids))
+        embeddings = self._embed(input_ids, embedding_overrides)
+        embeddings = self.mtp.pre_fc_norm_embedding(embeddings)
         hidden = self.mtp.pre_fc_norm_hidden(hidden_states.to(embeddings.dtype))
         hidden = self.mtp.fc(torch.cat((embeddings, hidden), dim=-1))
+        mrope_positions = cache_batch.mrope_positions
+        if mrope_positions is not None:
+            mrope_positions = mrope_positions.view(3, *input_ids.shape)
         for layer in self.mtp.layers:
-            hidden = layer(hidden, positions, kv_cache, cache_batch)
+            hidden = layer(
+                hidden,
+                positions,
+                kv_cache,
+                cache_batch,
+                mrope_positions=mrope_positions,
+            )
         hidden = self.mtp.norm(hidden)
         return self._logits(hidden, logits_indices), hidden
 
@@ -1277,6 +1373,20 @@ class Qwen3ForCausalLM(nn.Module):
         ):
             raise ValueError("logits_indices must contain valid token indices")
 
+    def _embed(
+        self,
+        input_ids: torch.Tensor,
+        overrides: EmbeddingOverrides | None,
+    ) -> torch.Tensor:
+        hidden = self.embed_tokens(input_ids)
+        if overrides is None:
+            return hidden
+        rows, values = overrides
+        flat = hidden.reshape(-1, hidden.size(-1))
+        # 图片占位 token 的 embedding 换成对应的视觉特征（与 HF 的 masked_scatter 等价）。
+        flat.index_copy_(0, rows.to(flat.device), values.to(flat.device, flat.dtype))
+        return flat.view_as(hidden)
+
     def _logits(
         self,
         normalized: torch.Tensor,
@@ -1300,10 +1410,23 @@ class Qwen3ForCausalLM(nn.Module):
         *,
         state_batch: RecurrentStateBatch | None = None,
         return_hidden: bool = False,
+        mrope_positions: torch.Tensor | None = None,
+        embedding_overrides: EmbeddingOverrides | None = None,
     ):
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self._embed(input_ids, embedding_overrides)
+        if mrope_positions is None and cache_batch is not None:
+            mrope_positions = cache_batch.mrope_positions
+        if mrope_positions is not None:
+            mrope_positions = mrope_positions.view(3, *input_ids.shape)
         for layer in self.layers:
-            hidden_states = layer(hidden_states, positions, kv_cache, cache_batch, state_batch)
+            hidden_states = layer(
+                hidden_states,
+                positions,
+                kv_cache,
+                cache_batch,
+                state_batch,
+                mrope_positions,
+            )
         if not return_hidden:
             if logits_indices is not None:
                 if not logits_indices:

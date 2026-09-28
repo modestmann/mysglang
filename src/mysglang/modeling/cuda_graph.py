@@ -163,6 +163,7 @@ class DecodeCudaGraphRunner:
         input_token_ids: tuple[int, ...],
         request_ids: tuple[str, ...],
         input_hidden: torch.Tensor | None = None,
+        rope_deltas: tuple[int, ...] | None = None,
     ) -> GraphDecodeResult:
         batch_size = len(request_ids)
         if batch_size not in self._buckets:
@@ -175,6 +176,7 @@ class DecodeCudaGraphRunner:
             request_ids,
             bucket.metadata,
             commit_lengths=False,
+            rope_deltas=rope_deltas,
         )
         state_batch = (
             None
