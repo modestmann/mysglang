@@ -58,6 +58,7 @@ def _parser() -> argparse.ArgumentParser:
         "--linear-attention-backend", choices=("auto", "torch", "fla"), default="auto"
     )
     parser.add_argument("--dequantize-fp8", action="store_true")
+    parser.add_argument("--max-image-pixels", type=int, default=1024 * 1024)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--top-p", type=float, default=1.0)

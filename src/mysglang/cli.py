@@ -39,7 +39,7 @@ import asyncio
 import importlib.util
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -53,7 +53,7 @@ from mysglang.modeling import (
     TorchAttentionBackend,
 )
 from mysglang.modeling.deltanet import LINEAR_ATTENTION_BACKENDS
-from mysglang.multimodal import ImageProcessor
+from mysglang.multimodal import ImageProcessor, load_image
 from mysglang.scheduler import SchedulerConfig, TensorParallelScheduler
 from mysglang.serving import GenerationService
 from mysglang.serving.parsers import ReasoningParser
@@ -132,6 +132,12 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="load the vision tower for image input (default: when the checkpoint has one)",
+    )
+    parser.add_argument(
+        "--max-image-pixels",
+        type=int,
+        default=1024 * 1024,
+        help="downscale larger images to this many pixels (~1 image token per 32x32 pixels)",
     )
     parser.add_argument(
         "--image",
@@ -258,6 +264,14 @@ def _vision_enabled(args: argparse.Namespace, model_path: Path) -> bool:
     return args.vision
 
 
+def _normalize_image_path(raw: str) -> str:
+    """Accept quoted paths and Windows paths (``C:\\x\\y.jpg`` -> ``/mnt/c/x/y.jpg`` on WSL)."""
+    path = raw.strip().strip("\"'")
+    if len(path) > 2 and path[1] == ":" and path[2] in "\\/" and not Path(path).exists():
+        path = f"/mnt/{path[0].lower()}/{path[3:].replace(chr(92), '/')}"
+    return path
+
+
 def _user_message(text: str, images: Sequence[str]) -> dict:
     if not images:
         return {"role": "user", "content": text}
@@ -349,7 +363,10 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         image_processor=(
             None
             if model.visual is None
-            else ImageProcessor.from_pretrained(model_path, model.config.vision)
+            else replace(
+                ImageProcessor.from_pretrained(model_path, model.config.vision),
+                max_pixels=args.max_image_pixels,
+            )
         ),
     )
     return _LoadedRuntime(service, scheduler, owns_process_group)
@@ -417,8 +434,18 @@ async def _run_driver(service: GenerationService, args: argparse.Namespace) -> N
             pending_images.clear()
             print("对话已清空。")
             continue
-        if command.startswith("/image "):
-            pending_images.append(prompt.strip()[len("/image ") :].strip())
+        if command.split(maxsplit=1)[:1] == ["/image"]:
+            parts = prompt.strip().split(maxsplit=1)
+            if len(parts) < 2:
+                print("用法：/image 图片路径（或 URL）")
+                continue
+            image = _normalize_image_path(parts[1])
+            try:
+                load_image(image).verify()
+            except Exception as exc:  # noqa: BLE001 - report any unreadable image to the user
+                print(f"无法读取图片 {image}：{exc}")
+                continue
+            pending_images.append(image)
             print(f"已附加图片（共 {len(pending_images)} 张），将随下一句发送。")
             continue
         if not prompt.strip():
