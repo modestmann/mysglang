@@ -11,7 +11,7 @@ Attention/MTP 结构相同，只是 MLP 为 dense。FP8 checkpoint 由 `benchmar
 |---|---|
 | GPU | RTX 4060 Laptop 8 GB（sm_89），WSL2 |
 | 软件 | torch 2.13.0+cu130、flash-attn 2.8.3.post1、flash-linear-attention 0.5.2、transformers 5.16.1 |
-| 代码 | 分支 `qwen3.6-hybrid-mtp`（基于 `9b7a3f3`，JSONL 中的 git commit 是基点） |
+| 代码 | 分支 `qwen3.6-hybrid-mtp`（JSONL 中记录的基点 `9b7a3f3` 已从历史中移除，现基点为 `25eb926`，代码无差别） |
 | 配置 | BF16 激活，FA2 paged（page 256），DeltaNet 用 fla，全部开启 `--cuda-graph` |
 
 ## 正确性（先于性能）
