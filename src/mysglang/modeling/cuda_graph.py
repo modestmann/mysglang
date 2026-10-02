@@ -157,7 +157,7 @@ class DecodeCudaGraphRunner:
         result = self.run_positions(input_token_ids, request_ids)
         return tuple(tokens[-1] for tokens in result.token_ids)
 
-    @torch.inference_mode()
+    @torch.inference_mode()#主函数
     def run_positions(
         self,
         input_token_ids: tuple[int, ...],
@@ -171,11 +171,11 @@ class DecodeCudaGraphRunner:
         if len(input_token_ids) != batch_size * self.append_length:
             raise ValueError("Decode input tokens must match the bucket shape")
 
-        bucket = self._buckets[batch_size]
-        batch = self.cache.prepare_decode_batch(
+        bucket = self._buckets[batch_size] # 取出这个 batch 大小的桶
+        batch = self.cache.prepare_decode_batch( # ① 把这一步的数据复制进桶里的固定地址
             request_ids,
             bucket.metadata,
-            commit_lengths=False,
+            commit_lengths=False,  # forward 里不要推进 _lengths（不幂等！）
             rope_deltas=rope_deltas,
         )
         state_batch = (
@@ -191,15 +191,15 @@ class DecodeCudaGraphRunner:
             if input_hidden is None:
                 raise ValueError("this graph requires input hidden states")
             bucket.input_hidden.copy_(input_hidden.view_as(bucket.input_hidden))
-
+# ② 第一次用这个桶：先录图
         if bucket.graph is None:
             # 预热会真实执行前向并推进 DeltaNet 状态；捕获后恢复，replay 才从正确状态开始。
             snapshot = (
                 None if state_batch is None else self._recurrent.snapshot(state_batch.slots)
-            )
-            self._capture(bucket, batch, state_batch)
+            ) # 存档：把这批请求的格子复制一份
+            self._capture(bucket, batch, state_batch)#预热、捕获  # 预热 2 遍 + 录 1 遍：S 被多写了 3 次
             if snapshot is not None:
-                self._recurrent.restore(state_batch.slots, snapshot)
+                self._recurrent.restore(state_batch.slots, snapshot)  # 读档：把格子恢复成存档时的样子
 
         assert bucket.graph is not None
         assert bucket.output_token_ids is not None
@@ -209,7 +209,7 @@ class DecodeCudaGraphRunner:
 
         # CPU 需要 token，同时这个同步点保证所有层 KV 已写完，之后才能提交逻辑长度。
         token_ids = tuple(tuple(row) for row in bucket.output_token_ids.tolist())
-        self.cache.commit_batch(batch)
+        self.cache.commit_batch(batch) # ⑤ GPU 确定写完了，CPU 才把每个请求的 _lengths 推进一步（只做这一次）
         self._replays += 1
         return GraphDecodeResult(
             token_ids, bucket.output_hidden, state_batch, bucket.output_logits

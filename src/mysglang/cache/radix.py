@@ -24,8 +24,8 @@ class _RadixNode:
     def __init__(
         self,
         *,
-        key: tuple[int, ...] = (),
-        pages: tuple[int, ...] = (),
+        key: tuple[int, ...] = (),#这条边上的 token，长度一定是 page_size 的倍数
+        pages: tuple[int, ...] = (),#这些 token 对应的物理页，一页对应 key 里的 4 个 token
         parent: _RadixNode | None = None,
         timestamp: int = 0,
         node_id: int = 0,
@@ -60,7 +60,7 @@ class RadixInsertResult:
     handle: RadixCacheHandle
 
 
-class RadixPrefixCache:
+class RadixPrefixCache:#只管"树"
     """A page-aligned compressed radix tree from token IDs to physical pages."""
 
     def __init__(self, page_size: int) -> None:
@@ -101,16 +101,16 @@ class RadixPrefixCache:
         return frozenset(
             page for node in self._nodes() if node is not self.root for page in node.pages
         )
-
+########入口
     def match_prefix(self, token_ids: Sequence[int], *, record: bool = True) -> RadixCacheHandle:
-        tokens = self._aligned_tokens(token_ids)
-        node, matched = self._walk(tokens, touch=record)
+        tokens = self._aligned_tokens(token_ids) # ① 截到整页
+        node, matched = self._walk(tokens, touch=record) # ② 往下走
         if record:
             self._match_requests += 1
             self._matched_tokens += matched
-        return RadixCacheHandle(matched, node)
+        return RadixCacheHandle(matched, node)   # ③ 返回"走到哪个节点、匹配几个 token"
 
-    def insert_prefix(self, token_ids: Sequence[int], pages: Sequence[int]) -> RadixInsertResult:
+    def insert_prefix(self, token_ids: Sequence[int], pages: Sequence[int]) -> RadixInsertResult:#插入
         tokens = self._aligned_tokens(token_ids)
         physical_pages = tuple(pages)
         if len(tokens) != len(physical_pages) * self.page_size:
@@ -119,8 +119,8 @@ class RadixPrefixCache:
             raise ValueError("a prefix cannot contain duplicate physical pages")
 
         self._insert_requests += 1
-        node, matched = self._walk(tokens, touch=True)
-        if matched < len(tokens):
+        node, matched = self._walk(tokens, touch=True)#走一遍
+        if matched < len(tokens):#挂新节点
             page_offset = matched // self.page_size
             child = self._new_node(
                 key=tokens[matched:],
@@ -131,7 +131,7 @@ class RadixPrefixCache:
             node = child
         return RadixInsertResult(matched, RadixCacheHandle(len(tokens), node))
 
-    def lock(self, handle: RadixCacheHandle) -> None:
+    def lock(self, handle: RadixCacheHandle) -> None:#加锁要一路走到 root，handle.node 是匹配到的最深那个节点
         if self._is_root_handle(handle):
             return
         self._validate_current_handle(handle)
@@ -150,7 +150,7 @@ class RadixPrefixCache:
                 raise RuntimeError("radix handle is not locked")
             node.ref_count -= 1
             node = self._parent(node)
-
+#只淘汰叶子，也就是没有 children 的节点。只淘汰 ref_count == 0 的，有人在用的不能动。
     def evict_pages(self, minimum_pages: int) -> tuple[int, ...]:
         if minimum_pages < 0:
             raise ValueError("minimum_pages must be non-negative")
@@ -164,20 +164,20 @@ class RadixPrefixCache:
             for node in self._nodes()
             if node is not self.root and not node.children and node.ref_count == 0
         ]
-        heapq.heapify(leaves)
+        heapq.heapify(leaves)# 做成一个最小堆：每次能直接取出 timestamp 最小的
         evicted: list[int] = []
-        while len(evicted) < minimum_pages:
+        while len(evicted) < minimum_pages:# 还没腾够
             if not leaves:
                 raise RuntimeError("radix tree could not find enough evictable leaves")
-            _, _, node = heapq.heappop(leaves)
+            _, _, node = heapq.heappop(leaves)  # 取出最久没用的叶子
             if node.children or node.ref_count != 0:
                 continue
             parent = self._parent(node)
-            del parent.children[self._edge_key(node.key)]
+            del parent.children[self._edge_key(node.key)]# 把它从父节点上摘掉
             node.parent = None
-            evicted.extend(node.pages)
+            evicted.extend(node.pages)  # 它的页记为已淘汰
             if parent is not self.root and not parent.children and parent.ref_count == 0:
-                heapq.heappush(leaves, (parent.timestamp, parent.node_id, parent))
+                heapq.heappush(leaves, (parent.timestamp, parent.node_id, parent))  # 父节点刚变成叶子，也加入候选
 
         self._evicted_pages += len(evicted)
         return tuple(evicted)
@@ -224,11 +224,11 @@ class RadixPrefixCache:
         node = self.root
         matched = 0
         while matched < len(tokens):
-            child = node.children.get(self._edge_key(tokens[matched:]))
+            child = node.children.get(self._edge_key(tokens[matched:]))# _edge_key 取前 4 个 = (A,B,C,D)
             if child is None:
                 break
-            common = self._common_prefix(child.key, tokens[matched:])
-            common -= common % self.page_size
+            common = self._common_prefix(child.key, tokens[matched:])#匹配最长
+            common -= common % self.page_size# （向下对齐到整页）
             if common == 0:
                 break
             matched += common
@@ -241,12 +241,12 @@ class RadixPrefixCache:
             if touch:
                 self._touch(node)
         return node, matched
-
+#摘下 N1 → 建前半段挂到 root → N1 改成后半段 → N1 挂到前半段下面
     def _split(self, node: _RadixNode, offset: int) -> _RadixNode:
         if not 0 < offset < len(node.key) or offset % self.page_size:
             raise ValueError("radix split must occur at an internal page boundary")
-        parent = self._parent(node)
-        del parent.children[self._edge_key(node.key)]
+        parent = self._parent(node)#找父节点
+        del parent.children[self._edge_key(node.key)]# 先把 N1 从 root 下面摘掉
         page_offset = offset // self.page_size
         prefix = self._new_node(
             key=node.key[:offset],
@@ -280,7 +280,8 @@ class RadixPrefixCache:
 
     def _touch(self, node: _RadixNode) -> None:
         node.timestamp = self._tick()
-
+#全局时钟，在 _walk 里，每走过一个节点就 _touch 一次（查询和插入时都会走）。
+#所以 timestamp 记录的是这个节点最后一次被用到的时间：数字越小，越久没用
     def _tick(self) -> int:
         self._clock += 1
         return self._clock
@@ -328,7 +329,7 @@ class RadixPrefixCache:
             raise RuntimeError("radix handle does not belong to the current tree")
 
 
-class RadixPagedKVCache(PagedKVCache):
+class RadixPagedKVCache(PagedKVCache):#继承 PagedKVCache，把"树"和"allocator"粘在一起
     """Paged KV storage whose complete pages can outlive and serve requests."""
 
     def __init__(self, *, enable_prefix_cache: bool = True, **kwargs) -> None:
@@ -337,7 +338,7 @@ class RadixPagedKVCache(PagedKVCache):
         # 递归状态（DeltaNet）无法从页面前缀恢复，混合模型因此关闭前缀复用；
         # 关闭后仍复用同一套 handle/reservation 路径，只是永远匹配根节点。
         self.enable_prefix_cache = enable_prefix_cache
-        self._handles: dict[str, RadixCacheHandle] = {}
+        self._handles: dict[str, RadixCacheHandle] = {}#请求 id → 这个请求的借书凭证（handle）
 
     def _match(self, token_ids: Sequence[int], *, record: bool) -> RadixCacheHandle:
         if not self.enable_prefix_cache:
@@ -353,7 +354,7 @@ class RadixPagedKVCache(PagedKVCache):
         committed = self.allocator.stats.reserved_pages + stats.protected_pages + newly_protected
         return committed + private_pages <= self.num_pages
 
-    def reserve_request_with_prefix(
+    def reserve_request_with_prefix(#查树，lock(handle)，锁住复用的前缀
         self,
         request_id: str,
         max_tokens: int,
@@ -367,7 +368,7 @@ class RadixPagedKVCache(PagedKVCache):
             self.allocator.stats.reserved_pages
             + self.prefix_cache.stats.protected_pages
             + private_pages
-        )
+        )#检验是否超过总页数
         if committed > self.num_pages:
             self.prefix_cache.unlock(handle)
             return None
@@ -389,19 +390,19 @@ class RadixPagedKVCache(PagedKVCache):
         needed = self.allocator.pages_for_tokens(num_tokens)
         additional = max(0, needed - len(table))
         missing = max(0, additional - self.allocator.stats.free_pages)
-        if missing:
-            evicted = self.prefix_cache.evict_pages(missing)
-            self.allocator.evict_cached(evicted)
+        if missing:#空闲页不足
+            evicted = self.prefix_cache.evict_pages(missing) # ① 从树里淘汰 missing 页
+            self.allocator.evict_cached(evicted) # ② 这些页从"缓存"挪到"空闲"
         return super().ensure_capacity(request_id, num_tokens)
 
-    def finish_request(self, request_id: str, token_ids: Sequence[int]) -> tuple[int, ...]:
-        self.publish_prefix(request_id, token_ids)
-        self.prefix_cache.unlock(self._handles.pop(request_id))
-        return super().release_request(request_id)
-
-    def publish_prefix(self, request_id: str, token_ids: Sequence[int]) -> int:
+    def finish_request(self, request_id: str, token_ids: Sequence[int]) -> tuple[int, ...]:#正常结束解锁
+        self.publish_prefix(request_id, token_ids)   # ① 再试着缓存一次
+        self.prefix_cache.unlock(self._handles.pop(request_id)) # ② 解锁并扔掉凭证
+        return super().release_request(request_id)    # ③ 父类：归还页
+##页表是 [3, 0, 1]。页3、页0 是缓存页，留在树里；页1 不是缓存页，也没人在用，回到空闲页
+    def publish_prefix(self, request_id: str, token_ids: Sequence[int]) -> int:#	prompt 刚读完	换锁：锁新节点，解旧节点
         """Publish all complete, already-computed pages of an active request.
-
+####R 的 prompt 已经算完了，立刻把它放进树里，别的请求就能复用
         The request keeps a lock on the canonical prefix, so another request can
         reuse it immediately while the publisher is still decoding.
         """
@@ -417,19 +418,19 @@ class RadixPagedKVCache(PagedKVCache):
 
         table = self.allocator.page_table(request_id)
         pages = table[: cacheable_length // self.page_size]
-        result = self.prefix_cache.insert_prefix(tuple(token_ids)[:cacheable_length], pages)
+        result = self.prefix_cache.insert_prefix(tuple(token_ids)[:cacheable_length], pages)#缓存写满的页
         self.allocator.mark_cached(result.handle.pages)
         self.allocator.replace_prefix(request_id, result.handle.pages)
-        self.prefix_cache.lock(result.handle)
+        self.prefix_cache.lock(result.handle)#加锁
         self._handles[request_id] = result.handle
-        self.prefix_cache.unlock(previous)
+        self.prefix_cache.unlock(previous)#解锁（适配新凭证）
         return result.handle.cached_len
 
-    def release_request(self, request_id: str) -> tuple[int, ...]:
+    def release_request(self, request_id: str) -> tuple[int, ...]:#abort解锁
         handle = self._handles.pop(request_id, None)
         if handle is not None:
-            self.prefix_cache.unlock(handle)
-        return super().release_request(request_id)
+            self.prefix_cache.unlock(handle)#解锁
+        return super().release_request(request_id)#归还页
 
     def reset_prefix_cache(self) -> None:
         if self._handles or self.allocator.request_ids:

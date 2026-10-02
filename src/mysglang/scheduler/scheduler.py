@@ -82,7 +82,7 @@ class SchedulerStats:
 
 
 @dataclass
-class _Entry:
+class _Entry:#request外包装
     request: Request
     # 请求进入 Scheduler 的 step，用来统计排队时间。
     enqueue_step: int
@@ -165,7 +165,7 @@ class Scheduler:
             self.cache.allocator.pages_for_tokens(model.config.max_position_embeddings),
         )
         self._decode_buffers: dict[int, PagedKVDecodeBuffer] = {}
-        self._cuda_graph_runner = (
+        self._cuda_graph_runner = (#不开投机：普通 decode
             DecodeCudaGraphRunner(
                 self.model,
                 self.cache,
@@ -177,9 +177,9 @@ class Scheduler:
             else None
         )
         # MTP 每轮 verify 的形状固定为 [batch, 1 + k]，同样可以按精确 batch size 捕获。
-        self._verify_graph_runner = (
+        self._verify_graph_runner = (#开投机 ①：主模型验证
             DecodeCudaGraphRunner(
-                self.model,
+                self.model,#开投机 ②：S 的掩码重放 _verify_graph_runner 里的 commit_graph
                 self.cache,
                 config.decode_cuda_graph_batch_sizes,
                 max_blocks=self._decode_max_blocks,
@@ -195,20 +195,20 @@ class Scheduler:
         if config.decode_cuda_graph_batch_sizes and self._mtp_steps:
             draft_cache = self._draft_cache
             if self._mtp_steps > 1:
-                self._mtp_draft_graph = MtpCudaGraphRunner(
+                self._mtp_draft_graph = MtpCudaGraphRunner(#开投机：猜 2 个以上时的递归猜测	_mtp_draft_graph
                     self.model,
                     draft_cache,
                     config.decode_cuda_graph_batch_sizes,
                     max_blocks=self._decode_max_blocks,
                 )
-            self._mtp_catch_up_graph = MtpCudaGraphRunner(
+            self._mtp_catch_up_graph = MtpCudaGraphRunner(#开投机 ③：MTP 追赶
                 self.model,
                 draft_cache,
                 config.decode_cuda_graph_batch_sizes,
                 max_blocks=self._decode_max_blocks,
                 append_length=1 + self._mtp_steps,
             )
-        self._waiting: deque[_Entry] = deque()
+        self._waiting: deque[_Entry] = deque()#三个存放请求的地方
         self._prefilling: dict[str, _Entry] = {}
         self._running: dict[str, _Entry] = {}
         # 所有未结束请求的总索引：waiting + prefilling + running。
@@ -408,14 +408,14 @@ class Scheduler:
         )
 
     def _prefill_step(self) -> SchedulerStep:
-        # 只快照本轮开始时的 Decode；刚完成 Prompt 的请求下轮才输入首个输出 token。
-        decoding = list(self._running.values())
+        # 只快照本轮开始时的 Decode；刚完成 Prompt 的请求下轮才输入首个输出 token。  prefill和decode拼桌
+        decoding = list(self._running.values())#可能一边推理一边从队列里面删除，所以要单开一列
         self._admit_prefill_requests()
         entries = list(self._prefilling.values())
         selected = entries[: min(len(entries), self.config.prefill_token_budget)]
         remaining_budget = self.config.prefill_token_budget
         chunks: list[tuple[_Entry, int, int]] = []
-        for index, entry in enumerate(selected):
+        for index, entry in enumerate(selected):#尽量均分prefill，如果前面的请求 prompt 很短，用不完自己那份，剩下的会自动让给后面的请求
             requests_left = len(selected) - index
             fair_share = max(1, remaining_budget // requests_left)
             start = entry.prefill_offset
@@ -424,8 +424,8 @@ class Scheduler:
             remaining_budget -= end - start
 
         decode_ids = tuple(entry.request.request_id for entry in decoding)
-        request_ids = decode_ids + tuple(entry.request.request_id for entry, _, _ in chunks)
-        append_lengths = (1,) * len(decoding) + tuple(end - start for _, start, end in chunks)
+        request_ids = decode_ids + tuple(entry.request.request_id for entry, _, _ in chunks)#本步参与计算的所有请求"，decode 的排在前面，prefill 的排在后面
+        append_lengths = (1,) * len(decoding) + tuple(end - start for _, start, end in chunks)#分段
         packed_tokens = [entry.request.last_output_token_id for entry in decoding]
         decode_starts = self.cache.lengths(decode_ids) if decoding else ()
         for request_id, length in zip(decode_ids, decode_starts):
@@ -442,7 +442,7 @@ class Scheduler:
             device=self._device,
         )
         # Decode 每个位置都采样；Prefill 仅在完整 Prompt 结束时采样。
-        logits_indices = list(range(len(decoding)))
+        logits_indices = list(range(len(decoding)))# decode 请求：每个都采样
         packed_offset = len(decoding)
         for entry, start, end in chunks:
             packed_offset += end - start
@@ -480,7 +480,7 @@ class Scheduler:
         completed_prefills = [
             entry for entry, _start, end in chunks if end == len(entry.request.prompt_token_ids)
         ]
-        sampled_entries = decoding + completed_prefills
+        sampled_entries = decoding + completed_prefills#按顺序和 logits_indices 一一对应
         next_token_ids = self._sync_token_ids(
             tuple(
                 self._sample(logits[index], entry.request)
@@ -519,7 +519,7 @@ class Scheduler:
                 entry.vision_features = None
 
         outputs = []
-        for entry, next_token in zip(decoding, next_token_ids[: len(decoding)]):
+        for entry, next_token in zip(decoding, next_token_ids[: len(decoding)]):#收尾，先处理decoding
             event = entry.request.record_token(next_token)
             outputs.append(event)
             if event.finished:
@@ -594,9 +594,9 @@ class Scheduler:
 
     def _single_token_decode_step(self, entries: list[_Entry]) -> SchedulerStep:
         request_ids = tuple(entry.request.request_id for entry in entries)
-        lengths = self.cache.lengths(request_ids)
+        lengths = self.cache.lengths(request_ids) # 每个请求 KV 已有多长
         for request_id, length in zip(request_ids, lengths):
-            self.cache.ensure_capacity(request_id, length + 1)
+            self.cache.ensure_capacity(request_id, length + 1) # 保证能再放 1 个 token
         input_token_ids = tuple(entry.request.last_output_token_id for entry in entries)
         use_cuda_graph = bool(
             self._cuda_graph_runner and self._cuda_graph_runner.supports(len(entries))
@@ -1097,7 +1097,7 @@ class Scheduler:
                 parts.append(linear.expand(3, -1))
         return torch.cat(parts, dim=1).to(self._device)
 
-    def _vision_overrides(self, rows, *, shift: int = 0):
+    def _vision_overrides(self, rows, *, shift: int = 0):#覆写图片向量
         """Rows whose input token (prompt position ``start + i + shift``) is an image token."""
         row_indices: list[int] = []
         features: list[torch.Tensor] = []
@@ -1194,12 +1194,12 @@ class Scheduler:
         entry.mtp_hidden = None
         entry.mtp_draft_prob = None
         entry.vision_features = None
-        if request_id in self.cache.allocator.request_ids:
+        if request_id in self.cache.allocator.request_ids:# 还持有页才释放
             if finished:
-                self.cache.finish_request(request_id, request.all_token_ids)
+                self.cache.finish_request(request_id, request.all_token_ids) # 正常结束：把页交给 radix 缓存
             else:
-                self.cache.release_request(request_id)
-        self._entries.pop(request_id, None)
+                self.cache.release_request(request_id)  # abort：直接归还
+        self._entries.pop(request_id, None) # 从总表里删除
         self._sampling_generators.pop(request_id, None)
         if finished:
             self._finished_requests += 1

@@ -82,7 +82,8 @@ class RecurrentStateStats:
 
 class RecurrentStatePool:
     """Fixed-address state slots for every linear-attention layer of one TP rank."""
-
+#DeltaNet 的 S 也是这个思路，只是更简单：启动时分配一个格子池（slot pool），
+#每个请求正好领一个格子，格子里装着这个请求在 18 个 DeltaNet 层的全部 S
     def __init__(
         self,
         *,
@@ -112,12 +113,12 @@ class RecurrentStatePool:
             (num_layers, num_slots, conv_dim, conv_kernel_size - 1),
             dtype=conv_dtype,
             device=device,
-        )
+        )#是短卷积要记住的最近 3 个输入
         self.ssm_states = torch.zeros(
             (num_layers, num_slots, num_heads, head_k_dim, head_v_dim),
             dtype=ssm_dtype,
-            device=device,
-        )
+            device=device,#层数、请求数、头数、每个头的S
+        )#两个大tensor用来存gated deltanet的相关矩阵
         self._free_slots = list(range(num_slots))
         self._slots: dict[str, int] = {}
 

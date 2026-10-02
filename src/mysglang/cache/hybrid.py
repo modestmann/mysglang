@@ -55,7 +55,7 @@ class HybridPagedKVCache(RadixPagedKVCache):
                 conv_dtype=self._keys.dtype,
                 device=self._keys.device,
             )
-        self.draft: PagedKVCompanion | None = None
+        self.draft: PagedKVCompanion | None = None#MTP的KVcache
         if num_draft_layers:
             self.draft = PagedKVCompanion(
                 allocator=self.allocator,

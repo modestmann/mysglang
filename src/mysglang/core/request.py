@@ -141,8 +141,8 @@ class Request:
     sampling_params: SamplingParams
     # 图片输入（像素、网格与 M-RoPE 位置）；纯文本请求为 None。
     multimodal: MultimodalInputs | None = None
-    _state: RequestState = field(default=RequestState.WAITING, init=False, repr=False)
-    _output_token_ids: list[int] = field(default_factory=list, init=False, repr=False)
+    _state: RequestState = field(default=RequestState.WAITING, init=False, repr=False)#当前状态
+    _output_token_ids: list[int] = field(default_factory=list, init=False, repr=False)#已生成token
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_id, str) or not self.request_id:
@@ -203,7 +203,7 @@ class Request:
 
     # 接收模型刚生成的一个 token，记录它，判断请求是否结束，并生成增量输出事件。
     def record_token(self, token_id: int) -> IncrementalOutput:
-        if self.state is not RequestState.DECODING:
+        if self.state is not RequestState.DECODING:#只有只有 Decode 状态才能收 token
             raise InvalidStateTransition(
                 f"request {self.request_id!r} cannot record a token while {self.state.value}"
             )
@@ -214,7 +214,7 @@ class Request:
         if reason is not None:
             self._transition_to(RequestState.FINISHED)
 
-        return IncrementalOutput(
+        return IncrementalOutput(#返回的 IncrementalOutput 会一路传回 HTTP 层，变成在流式输出里看到的一个个 chunk
             request_id=self.request_id,
             token_id=token_id,
             output_index=self.num_output_tokens - 1,
@@ -234,9 +234,9 @@ class Request:
 
     def _finish_reason(self, token_id: int) -> FinishReason | None:
         params = self.sampling_params
-        if token_id in params.all_stop_token_ids:
+        if token_id in params.all_stop_token_ids:#包含停止token
             return FinishReason.EOS
-        if self.num_output_tokens >= params.max_new_tokens:
+        if self.num_output_tokens >= params.max_new_tokens:#长度到达上限
             return FinishReason.LENGTH
         return None
 

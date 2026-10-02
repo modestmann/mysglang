@@ -126,10 +126,15 @@ class PageAllocator:
         self.num_pages = num_pages
         self.page_size = page_size
         self._free_pages = set(range(num_pages))  # 空闲物理页编号
-        self._cached_pages: set[int] = set()
+        self._cached_pages: set[int] = set()#被 radix 缓存的页号
         # 请求页表、最大 token 容量和 admission 预留承诺必须一起增删。
         # 例如："request-A" -> page_table=[0, 2]，"request-B" -> page_table=[1]。
         self._allocations: dict[str, _Allocation] = {}
+        """
+         每个请求一条记录 ↓
+      │          "req-A" → _Allocation(page_table=[0, 2], max_tokens=..., reserved_pages=..., ...)
+      │          "req-B" → _Allocation(page_table=[1], ...)
+        """
 
     @property
     def request_ids(self) -> frozenset[str]:
@@ -159,7 +164,7 @@ class PageAllocator:
             raise TypeError("num_tokens must be an integer")
         if num_tokens < 0:
             raise ValueError("num_tokens must be non-negative")
-        return (num_tokens + self.page_size - 1) // self.page_size
+        return (num_tokens + self.page_size - 1) // self.page_size#ceil
 
     def can_reserve(self, max_tokens: int) -> bool:
         needed = self.pages_for_tokens(max_tokens)
@@ -205,17 +210,17 @@ class PageAllocator:
                 f"request {request_id!r} exceeds its token reservation: "
                 f"{num_tokens} > {allocation.max_tokens}"
             )
-        needed = self.pages_for_tokens(num_tokens)
-        table = allocation.page_table
-        additional = needed - len(table)
+        needed = self.pages_for_tokens(num_tokens)#放 num_tokens 个 token 一共需要几页
+        table = allocation.page_table#请求的页表
+        additional = needed - len(table)#	还差几页
         if additional <= 0:
             return tuple(table)
-        if additional > len(self._free_pages):
+        if additional > len(self._free_pages):#self._free_pages全局空闲的物理页号
             raise PageAllocationError("reserved request cannot obtain its physical pages")
 
-        allocated = sorted(self._free_pages)[:additional]
-        table.extend(allocated)
-        self._free_pages.difference_update(allocated)
+        allocated = sorted(self._free_pages)[:additional]#取页号最小的几页
+        table.extend(allocated)#接到页表末尾
+        self._free_pages.difference_update(allocated)  #从空闲集合里删掉
         return tuple(table)
 
     def page_table(self, request_id: str) -> tuple[int, ...]:
@@ -350,7 +355,7 @@ class PagedKVCache:
             raise ValueError(f"cache dimensions must be positive: {invalid}")
         shape = (num_layers, num_pages, page_size, num_kv_heads, head_dim)
         self._keys = torch.empty(shape, dtype=dtype, device=device)
-        self._values = torch.empty_like(self._keys)
+        self._values = torch.empty_like(self._keys)# 真正的 KV 显存，全局唯一
         if allocator is None:
             allocator = PageAllocator(num_pages=num_pages, page_size=page_size)
         elif (allocator.num_pages, allocator.page_size) != (num_pages, page_size):

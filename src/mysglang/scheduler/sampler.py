@@ -7,7 +7,7 @@ import torch
 from mysglang.core import SamplingParams
 
 
-def apply_penalties(
+def apply_penalties(#重复惩罚
     logits: torch.Tensor,
     params: SamplingParams,
     output_token_ids: Sequence[int],
@@ -81,9 +81,9 @@ def sample_token(
 
 
 def speculative_accept(
-    draft: Sequence[int],
-    draft_probs: Sequence[torch.Tensor | None],
-    target_logits: torch.Tensor,
+    draft: Sequence[int],#MTP 的猜测，一串 token
+    draft_probs: Sequence[torch.Tensor | None],#每个猜测当初的概率表 q；n-gram 或 greedy 时是 None
+    target_logits: torch.Tensor,#	主模型验证时每个位置的 logits，比猜测多 1 行
     params: SamplingParams,
     history: Sequence[int],
     *,
