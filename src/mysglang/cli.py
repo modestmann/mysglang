@@ -83,7 +83,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--system", help="optional system message")
     parser.add_argument("--prompt", help="run one prompt and exit instead of opening the REPL")
-    parser.add_argument("--num-pages", type=int, default=16)
+    parser.add_argument(
+        "--num-pages",
+        type=int,
+        help="paged KV capacity; on CUDA defaults to what --memory-fraction leaves free",
+    )
+    parser.add_argument(
+        "--memory-fraction",
+        type=float,
+        default=0.85,
+        help="share of total GPU memory the engine may use when sizing the KV pool",
+    )
     parser.add_argument("--max-running-requests", type=int, default=1)
     parser.add_argument(
         "--prefill-token-budget",
@@ -235,9 +245,81 @@ def _rank_device(name: str, launch: _DistributedLaunch) -> torch.device:
     return requested
 
 
-def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
+# 自动 KV 池时每步 Prefill 的默认上限：池子可能有几万 token，整池一次 Prefill 的激活会 OOM。
+_AUTO_PREFILL_TOKEN_BUDGET = 8192
+
+
+def _recurrent_pool_bytes(model: Qwen3ForCausalLM, num_slots: int) -> int:
+    """DeltaNet 格子池的大小；它在 Scheduler 里才分配，测显存时还没占地方。"""
+    spec = model.recurrent_state_spec
+    if spec is None:
+        return 0
+    element = model.embed_tokens.weight.element_size()
+    conv = spec.conv_dim * (spec.conv_kernel_size - 1) * element
+    ssm = spec.num_heads * spec.head_k_dim * spec.head_v_dim * 4  # float32
+    return num_slots * spec.num_layers * (conv + ssm)
+
+
+def _auto_num_pages(
+    model: Qwen3ForCausalLM,
+    page_size: int,
+    memory_fraction: float,
+    max_running_requests: int,
+) -> int:
+    if not 0 < memory_fraction <= 1:
+        raise ValueError("--memory-fraction must be in (0, 1]")
+    parameter = model.embed_tokens.weight
+    element = parameter.element_size()
+
+    # 一页 KV 的字节数：K、V 各一份，主模型 attention 层 + MTP 层。
+    layers = model.num_kv_cache_layers + model.num_draft_kv_layers
+    heads = model.kv_cache_num_heads
+    head_dim = model.config.head_dim
+    bytes_per_page = 2 * layers * heads * head_dim * page_size * element
+
+    # 整张卡留出 (1 − memory_fraction) 给激活、CUDA Graph 和其他进程，再扣掉还没分配的格子池。
+    free, total = torch.cuda.mem_get_info(parameter.device)
+    budget = free - total * (1 - memory_fraction)
+    budget -= _recurrent_pool_bytes(model, max_running_requests)
+
+    num_pages = int(budget // bytes_per_page)
+    if model.tensor_parallel.enabled:
+        # 各卡空闲显存不同，但调度必须一致：所有卡取最小值。
+        shared = torch.tensor([num_pages], device=parameter.device)
+        dist.all_reduce(shared, op=dist.ReduceOp.MIN, group=model.tensor_parallel.process_group)
+        num_pages = int(shared.item())
+    if num_pages <= 0:
+        raise RuntimeError(
+            f"no GPU memory left for the KV pool ({free / 2**30:.2f} GiB free); "
+            "raise --memory-fraction or pass --num-pages"
+        )
+    return num_pages
+
+
+def _scheduler_config(
+    args: argparse.Namespace,
+    backend,
+    model: Qwen3ForCausalLM | None = None,
+) -> SchedulerConfig:
     page_size = 256 if isinstance(backend, FlashAttentionBackend) else 16
-    prefill_token_budget = args.prefill_token_budget or args.num_pages * page_size
+    num_pages = args.num_pages
+    default_prefill_budget = None
+    if num_pages is None:
+        if model is not None and model.embed_tokens.weight.is_cuda:
+            num_pages = _auto_num_pages(
+                model, page_size, getattr(args, "memory_fraction", 0.85), args.max_running_requests
+            )
+            default_prefill_budget = _AUTO_PREFILL_TOKEN_BUDGET
+            print(
+                f"[KV] auto-sized {num_pages} pages × {page_size} tokens "
+                f"(--memory-fraction {getattr(args, 'memory_fraction', 0.85)})",
+                flush=True,
+            )
+        else:
+            num_pages = 16  # CPU 测不了空闲显存，沿用原来的默认值
+    prefill_token_budget = args.prefill_token_budget or min(
+        num_pages * page_size, default_prefill_budget or num_pages * page_size
+    )
     graph_batch_sizes = getattr(args, "decode_cuda_graph_batch_sizes", None)
     if graph_batch_sizes is None:
         requested = getattr(args, "cuda_graph_batch_sizes", None) or (1,)
@@ -245,7 +327,7 @@ def _scheduler_config(args: argparse.Namespace, backend) -> SchedulerConfig:
     return SchedulerConfig(
         max_running_requests=args.max_running_requests,
         prefill_token_budget=prefill_token_budget,
-        num_pages=args.num_pages,
+        num_pages=num_pages,
         page_size=page_size,
         decode_cuda_graph_batch_sizes=graph_batch_sizes,
         speculative_ngram_max_tokens=args.speculative_ngram_max_tokens,
@@ -337,7 +419,7 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         fp8_weights=not args.dequantize_fp8,
         enable_vision=_vision_enabled(args, model_path),
     )
-    scheduler_config = _scheduler_config(args, backend)
+    scheduler_config = _scheduler_config(args, backend, model)
     if tensor_parallel.enabled:
         scheduler = TensorParallelScheduler(
             model,
