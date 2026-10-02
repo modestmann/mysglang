@@ -344,6 +344,35 @@ class HybridSchedulerTest(unittest.TestCase):
                     self.assertGreater(stats.speculative_draft_forwards, 0)
 
     @torch.inference_mode()
+    def test_preemption_recomputes_state_slots_and_mtp_draft_kv(self) -> None:
+        prompts, lengths = self._prompts(), [12, 7, 15, 20]
+        for steps in (0, 1, 3):
+            with self.subTest(mtp_steps=steps):
+                model = make_hybrid(mtp=bool(steps))
+                expected = {
+                    f"r{index}": reference_generate(model, prompt, length)
+                    for index, (prompt, length) in enumerate(zip(prompts, lengths))
+                }
+                scheduler = Scheduler(
+                    model,
+                    SchedulerConfig(
+                        max_running_requests=3,
+                        prefill_token_budget=16,
+                        # 三个请求最坏情况要约 30 页；只给 18 页，逼出抢占。
+                        num_pages=18,
+                        page_size=4,
+                        speculative_mtp_steps=steps,
+                        enable_preemption=True,
+                    ),
+                )
+                for index, (prompt, length) in enumerate(zip(prompts, lengths)):
+                    scheduler.add(make_request(f"r{index}", prompt, length))
+                self.assertEqual(drain_scheduler(scheduler), expected)
+                self.assertGreater(scheduler.stats.preempted_requests, 0)
+                self.assertEqual(scheduler.cache.recurrent.stats.free_slots, 3)
+                scheduler.check_integrity()
+
+    @torch.inference_mode()
     def test_mtp_accepted_drafts_keep_state_and_draft_cache_aligned(self) -> None:
         model = make_hybrid(seed=33, mtp=True)
         prompts = self._prompts(seed=9)[:2]

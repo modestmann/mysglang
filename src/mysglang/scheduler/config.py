@@ -20,6 +20,10 @@ class SchedulerConfig:
     speculative_ngram_max_match: int = 8
     # 0 表示关闭。开启后用模型自带的 MTP 层为 greedy 请求递归生成这么多个草稿 token。
     speculative_mtp_steps: int = 0
+    # 抢占 + 重算：准入只预留 prefill 需要的页，decode 时额度按需增长；
+    # 页不够时抢占最后准入的请求，放回等待队首，之后用 prompt + 已生成 token 重新 prefill。
+    # 关闭时（默认）按 prompt + max_new_tokens 最坏情况预留，永不抢占。
+    enable_preemption: bool = False
 
     def __post_init__(self) -> None:
         for name in (

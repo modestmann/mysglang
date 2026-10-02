@@ -20,6 +20,29 @@ class PageAllocatorTest(unittest.TestCase):
         self.assertEqual(allocator.request_ids, frozenset({"first"}))
         allocator.check_integrity()
 
+    def test_reservation_grows_with_usage_and_refuses_when_full(self) -> None:
+        allocator = PageAllocator(num_pages=4, page_size=4)
+        # 两个请求各只预留 prefill 的 1 页，上限都是 3 页（12 个 token）。
+        self.assertTrue(allocator.reserve_request("a", 12, reserved_tokens=4))
+        self.assertTrue(allocator.reserve_request("b", 12, reserved_tokens=4))
+        self.assertEqual(allocator.stats.admission_available_pages, 2)
+        with self.assertRaisesRegex(Exception, "exceeds its token reservation"):
+            allocator.ensure_capacity("a", 5)
+
+        self.assertTrue(allocator.grow_reservation("a", 5))
+        self.assertEqual(allocator.ensure_capacity("a", 5), (0, 1))
+        self.assertTrue(allocator.grow_reservation("b", 8))
+        # 池子满了：失败且不改变任何记账。
+        self.assertFalse(allocator.grow_reservation("a", 9))
+        self.assertEqual(allocator.stats.reserved_pages, 4)
+        allocator.check_integrity()
+        with self.assertRaisesRegex(Exception, "maximum length"):
+            allocator.grow_reservation("a", 13)
+
+        allocator.release("b")
+        self.assertTrue(allocator.grow_reservation("a", 12))
+        allocator.check_integrity()
+
     def test_random_lifecycle_preserves_allocator_invariants(self) -> None:
         rng = random.Random(1234)
         allocator = PageAllocator(num_pages=12, page_size=4)

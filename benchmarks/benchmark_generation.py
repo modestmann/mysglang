@@ -50,6 +50,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefill-token-budget", type=int)
     parser.add_argument("--warmup-new-tokens", type=int, default=4)
     parser.add_argument("--cuda-graph", action="store_true")
+    parser.add_argument("--preemption", action="store_true")
+    parser.add_argument(
+        "--stop-at-eos",
+        action="store_true",
+        help="let requests stop at EOS (variable lengths) instead of always running to max",
+    )
     parser.add_argument("--speculative-ngram-max-tokens", type=int, default=0)
     parser.add_argument("--speculative-ngram-min-match", type=int, default=2)
     parser.add_argument("--speculative-ngram-max-match", type=int, default=8)
@@ -189,7 +195,7 @@ async def _one_batch(
             prompt_ids,
             max_new_tokens=output_tokens,
             eos_token_id=None,
-            ignore_eos=True,
+            ignore_eos=not args.stop_at_eos,
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
@@ -241,6 +247,7 @@ def _scheduler_delta(before: Any, after: Any) -> dict[str, int | float]:
         "speculative_draft_tokens",
         "speculative_accepted_tokens",
         "speculative_draft_forwards",
+        "preempted_requests",
     }
     result = asdict(after)
     for name in cumulative:
@@ -292,6 +299,8 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "num_pages": args.num_pages,
             "prefill_token_budget": args.prefill_token_budget,
             "cuda_graph": args.cuda_graph,
+            "preemption": args.preemption,
+            "stop_at_eos": args.stop_at_eos,
             "speculative_ngram": {
                 "max_tokens": args.speculative_ngram_max_tokens,
                 "min_match": args.speculative_ngram_min_match,

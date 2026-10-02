@@ -79,6 +79,7 @@ class SchedulerStats:
     speculative_accepted_tokens: int
     # MTP 头自己的前向次数（递归草稿步 + 每轮之后的追赶步），不计入 model_forwards。
     speculative_draft_forwards: int = 0
+    preempted_requests: int = 0
 
 
 @dataclass
@@ -88,6 +89,8 @@ class _Entry:#request外包装
     enqueue_step: int
     # Prompt 已经 Prefill 到哪里；长 Prompt 会按 budget 分块处理。
     prefill_offset: int = 0
+    # 这次 prefill 要送进模型的 token：首次是 prompt；被抢占后重算是 prompt + 已生成的 token。
+    prefill_tokens: tuple[int, ...] = ()
     # MTP：最近一次追赶前向在最后位置给出的下一轮首个草稿，以及该位置的 MTP hidden。
     mtp_draft: int | None = None
     mtp_hidden: torch.Tensor | None = None
@@ -232,6 +235,9 @@ class Scheduler:
         self._speculative_draft_tokens = 0
         self._speculative_accepted_tokens = 0
         self._speculative_draft_forwards = 0
+        self._preempted_requests = 0
+        # 本步刚抢占过就不再准入新请求，否则刚腾出的页马上又被占满，来回抖动。
+        self._preempted_this_step = False
         self._closed = False
 
     @property
@@ -288,6 +294,7 @@ class Scheduler:
             speculative_draft_tokens=self._speculative_draft_tokens,
             speculative_accepted_tokens=self._speculative_accepted_tokens,
             speculative_draft_forwards=self._speculative_draft_forwards,
+            preempted_requests=self._preempted_requests,
         )
 
     def validate(self, request: Request) -> None:
@@ -345,6 +352,9 @@ class Scheduler:
     @torch.inference_mode()
     def step(self) -> SchedulerStep | None:
         """Include every running decode in a prefill step, or run dense decode."""
+        self._preempted_this_step = False
+        if self.config.enable_preemption:
+            self._make_room_for_decode()
         if self._can_prefill():
             result = self._prefill_step()
         elif self._running:
@@ -402,10 +412,21 @@ class Scheduler:
             return False
         if self.cache.allocator.stats.request_count >= self.config.max_running_requests:
             return False
+        if self._preempted_this_step:
+            return False
         request = self._waiting[0].request
         return self.cache.can_reserve_request(
-            self._max_request_tokens(request), request.prompt_token_ids
+            self._max_request_tokens(request),
+            request.all_token_ids,
+            self._admission_tokens(request),
         )
+
+    def _admission_tokens(self, request: Request) -> int | None:
+        """准入时额度覆盖多少 token；None 表示按 prompt + max_new_tokens 最坏情况一次预留。"""
+        # 图片请求重算要重新处理 M-RoPE 与视觉替换，暂不参与抢占：仍按最坏情况预留。
+        if not self.config.enable_preemption or request.multimodal is not None:
+            return None
+        return len(request.all_token_ids)
 
     def _prefill_step(self) -> SchedulerStep:
         # 只快照本轮开始时的 Decode；刚完成 Prompt 的请求下轮才输入首个输出 token。  prefill和decode拼桌
@@ -419,7 +440,7 @@ class Scheduler:
             requests_left = len(selected) - index
             fair_share = max(1, remaining_budget // requests_left)
             start = entry.prefill_offset
-            end = min(start + fair_share, len(entry.request.prompt_token_ids))
+            end = min(start + fair_share, len(entry.prefill_tokens))
             chunks.append((entry, start, end))
             remaining_budget -= end - start
 
@@ -434,7 +455,7 @@ class Scheduler:
             request_id = entry.request.request_id
             # reservation 是容量承诺；这里才从 free pages 取物理页并写入请求页表。
             self.cache.ensure_capacity(request_id, end)
-            packed_tokens.extend(entry.request.prompt_token_ids[start:end])
+            packed_tokens.extend(entry.prefill_tokens[start:end])
 
         input_ids = torch.tensor(
             packed_tokens,
@@ -446,7 +467,7 @@ class Scheduler:
         packed_offset = len(decoding)
         for entry, start, end in chunks:
             packed_offset += end - start
-            if end == len(entry.request.prompt_token_ids):
+            if end == len(entry.prefill_tokens): # 这个请求的 prompt 算完了
                 logits_indices.append(packed_offset - 1)
         phase = "mixed" if decoding else "prefill"
         self._validate_batch_plan(
@@ -478,7 +499,7 @@ class Scheduler:
         self._max_decode_batch_size = max(self._max_decode_batch_size, len(decoding))
 
         completed_prefills = [
-            entry for entry, _start, end in chunks if end == len(entry.request.prompt_token_ids)
+            entry for entry, _start, end in chunks if end == len(entry.prefill_tokens)
         ]
         sampled_entries = decoding + completed_prefills#按顺序和 logits_indices 一一对应
         next_token_ids = self._sync_token_ids(
@@ -498,7 +519,7 @@ class Scheduler:
             row = len(decoding)
             sampled = len(decoding)
             for entry, start, end in chunks:
-                prompt = entry.request.prompt_token_ids
+                prompt = entry.prefill_tokens
                 if end == len(prompt):
                     following = next_token_ids[sampled]
                     sampled += 1
@@ -515,7 +536,7 @@ class Scheduler:
                 row += end - start
             self._mtp_catch_up(segments, hidden)
         for entry, _start, end in chunks:
-            if end == len(entry.request.prompt_token_ids):
+            if end == len(entry.prefill_tokens):
                 entry.vision_features = None
 
         outputs = []
@@ -532,9 +553,9 @@ class Scheduler:
             entry.prefill_offset = end
             self._prefilling.pop(request_id)
 
-            if end == len(request.prompt_token_ids):
+            if end == len(entry.prefill_tokens):
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
-                self.cache.publish_prefix(request_id, request.prompt_token_ids)
+                self.cache.publish_prefix(request_id, entry.prefill_tokens)
                 request.start_decode()
                 next_token = next_token_ids[token_offset]
                 token_offset += 1
@@ -559,27 +580,72 @@ class Scheduler:
     def _admit_prefill_requests(self) -> None:
         while (
             self._waiting
+            and not self._preempted_this_step
             and self.cache.allocator.stats.request_count < self.config.max_running_requests
         ):
             entry = self._waiting[0]
             request = entry.request
+            # 首次准入是 prompt；被抢占过的请求还要带上已生成的 token 一起重算。
+            tokens = request.all_token_ids
+            reserved_tokens = self._admission_tokens(request)
             if not self.cache.can_reserve_request(
                 self._max_request_tokens(request),
-                request.prompt_token_ids,
+                tokens,
+                reserved_tokens,
             ):
                 break
             matched = self.cache.reserve_request_with_prefix(
                 request.request_id,
                 self._max_request_tokens(request),
-                request.prompt_token_ids,
+                tokens,
+                reserved_tokens,
             )
             if matched is None:
                 raise RuntimeError("prefill selected without enough radix cache capacity")
             self._waiting.popleft()
             request.start_prefill()
+            entry.prefill_tokens = tokens
             entry.prefill_offset = matched
             self._prefilling[request.request_id] = entry
             self._max_wait_steps = max(self._max_wait_steps, self._step_index - entry.enqueue_step)
+
+    def _decode_growth(self) -> int:
+        """一个运行中的请求这一步最多新写几个 token：1 个输入 + 投机的草稿。"""
+        return 1 + max(self._mtp_steps, self.config.speculative_ngram_max_tokens)
+
+    def _make_room_for_decode(self) -> None:
+        """保证每个运行中的请求这一步都能再放 _decode_growth() 个 token；不够就抢占。"""
+        growth = self._decode_growth()
+        for entry in list(self._running.values()):  # 按开始 decode 的先后检查
+            request = entry.request
+            if request.request_id not in self._running:
+                continue  # 前面已经被抢占掉了
+            length = self.cache.lengths((request.request_id,))[0]
+            need = min(length + growth, self._max_request_tokens(request))
+            while not self.cache.grow_reservation(request.request_id, need):
+                # 图片请求按最坏情况预留、从不需要增长，也不当牺牲品；
+                # 额度不够的这个请求本身一定是文字请求，所以 candidates 不会为空。
+                candidates = [e for e in self._running.values() if e.request.multimodal is None]
+                victim = candidates[-1]  # 最后准入的：算得最少，重算最便宜
+                self._preempt(victim)
+                if victim is entry:
+                    break  # 把自己抢占了，不用再给自己腾地方
+
+    def _preempt(self, entry: _Entry) -> None:
+        """把一个运行中的请求退回等待队首；它的 entry、随机数生成器都保留。"""
+        request = entry.request
+        request_id = request.request_id
+        self._running.pop(request_id)
+        request.preempt()
+        # 先把写满的页插进 radix 再释放，重算时能命中自己的前缀；
+        # 混合模型关着前缀缓存，就是从头算。
+        self.cache.finish_request(request_id, request.all_token_ids)
+        entry.prefill_offset = 0
+        entry.prefill_tokens = ()
+        entry.mtp_draft = entry.mtp_hidden = entry.mtp_draft_prob = None
+        self._waiting.appendleft(entry)
+        self._preempted_requests += 1
+        self._preempted_this_step = True
 
     def _decode_step(self) -> SchedulerStep:
         entries = list(self._running.values())

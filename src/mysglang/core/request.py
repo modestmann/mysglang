@@ -125,8 +125,13 @@ class IncrementalOutput:
 # 不可修改的集合，集中描述 Request 状态迁移表。
 _ALLOWED_TRANSITIONS = {
     RequestState.WAITING: frozenset({RequestState.PREFILL, RequestState.ABORTED}),
-    RequestState.PREFILL: frozenset({RequestState.DECODING, RequestState.ABORTED}),
-    RequestState.DECODING: frozenset({RequestState.FINISHED, RequestState.ABORTED}),
+    # 退回 WAITING 是被抢占：释放 KV，之后从 prompt + 已生成 token 重新 prefill。
+    RequestState.PREFILL: frozenset(
+        {RequestState.DECODING, RequestState.ABORTED, RequestState.WAITING}
+    ),
+    RequestState.DECODING: frozenset(
+        {RequestState.FINISHED, RequestState.ABORTED, RequestState.WAITING}
+    ),
     RequestState.FINISHED: frozenset(),
     RequestState.ABORTED: frozenset(),
 }
@@ -231,6 +236,10 @@ class Request:
             finished=True,
             finish_reason=FinishReason.ABORTED,
         )
+
+    def preempt(self) -> None:
+        """被抢占：退回 WAITING。已生成的 token 已经流式发给用户，必须保留。"""
+        self._transition_to(RequestState.WAITING)
 
     def _finish_reason(self, token_id: int) -> FinishReason | None:
         params = self.sampling_params

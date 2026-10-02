@@ -144,6 +144,55 @@ def _distributed_scheduler_worker(
         dist.destroy_process_group()
 
 
+_PREEMPTION_PROMPTS = {"a": (1, 2, 3, 4), "b": (5, 6, 7, 8), "c": (9, 10, 11, 12)}
+
+
+def _preemption_worker(
+    rank: int,
+    world_size: int,
+    init_method: str,
+    config: ModelConfig,
+    state_dict: dict[str, torch.Tensor],
+    expected: dict[str, tuple[int, ...]],
+) -> None:
+    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+    dist.init_process_group("gloo", init_method=init_method, rank=rank, world_size=world_size)
+    try:
+        model = Qwen3ForCausalLM(
+            config, tensor_parallel=TensorParallelContext.from_distributed()
+        ).eval()
+        load_huggingface_state_dict(model, state_dict)
+        # 每个请求最坏 4 + 8 = 12 token = 6 页；10 页只能靠抢占同时跑 3 个。
+        scheduler = TensorParallelScheduler(
+            model,
+            SchedulerConfig(
+                max_running_requests=3,
+                prefill_token_budget=8,
+                num_pages=10,
+                page_size=2,
+                enable_preemption=True,
+            ),
+        )
+        if rank != 0:
+            scheduler.run_worker_loop()
+            scheduler.check_integrity()
+            return
+        for request_id, prompt in _PREEMPTION_PROMPTS.items():
+            scheduler.add(Request(request_id, prompt, SamplingParams(max_new_tokens=8)))
+        actual: dict[str, list[int]] = {}
+        while scheduler.has_work:
+            step = scheduler.step()
+            assert step is not None
+            for event in step.outputs:
+                actual.setdefault(event.request_id, []).append(event.token_id)
+            scheduler.check_integrity()
+        assert {key: tuple(value) for key, value in actual.items()} == expected
+        assert scheduler.stats.preempted_requests > 0
+        scheduler.shutdown()
+    finally:
+        dist.destroy_process_group()
+
+
 class TensorParallelSchedulerTest(unittest.TestCase):
     @unittest.skipUnless(
         dist.is_available() and dist.is_gloo_available(),
@@ -178,6 +227,40 @@ class TensorParallelSchedulerTest(unittest.TestCase):
                     expected,
                     "sorted",
                     False,
+                ),
+                nprocs=2,
+                join=True,
+            )
+
+    @unittest.skipUnless(
+        dist.is_available() and dist.is_gloo_available(),
+        "requires torch.distributed with Gloo",
+    )
+    def test_tp2_preemption_is_mirrored_and_matches_tp1(self) -> None:
+        torch.manual_seed(323)
+        config = ModelConfig(
+            vocab_size=32,
+            hidden_size=24,
+            intermediate_size=48,
+            num_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=32,
+        )
+        reference = Qwen3ForCausalLM(config).eval()
+        expected = {
+            request_id: _reference_generate(reference, prompt, 8)
+            for request_id, prompt in _PREEMPTION_PROMPTS.items()
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(
+                _preemption_worker,
+                args=(
+                    2,
+                    f"file://{directory}/process-group",
+                    config,
+                    _hugging_face_layout(reference),
+                    expected,
                 ),
                 nprocs=2,
                 join=True,

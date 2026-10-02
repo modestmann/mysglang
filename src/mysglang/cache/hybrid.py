@@ -77,20 +77,28 @@ class HybridPagedKVCache(RadixPagedKVCache):
             total += self.recurrent.memory_bytes
         return total
 
-    def can_reserve_request(self, max_tokens: int, prompt_token_ids: Sequence[int]) -> bool:
+    def can_reserve_request(
+        self,
+        max_tokens: int,
+        prompt_token_ids: Sequence[int],
+        reserved_tokens: int | None = None,
+    ) -> bool:
         if self.recurrent is not None and not self.recurrent.can_reserve():
             return False
-        return super().can_reserve_request(max_tokens, prompt_token_ids)
+        return super().can_reserve_request(max_tokens, prompt_token_ids, reserved_tokens)
 
     def reserve_request_with_prefix(
         self,
         request_id: str,
         max_tokens: int,
         prompt_token_ids: Sequence[int],
+        reserved_tokens: int | None = None,
     ) -> int | None:
         if self.recurrent is not None and not self.recurrent.can_reserve():
             return None
-        matched = super().reserve_request_with_prefix(request_id, max_tokens, prompt_token_ids)
+        matched = super().reserve_request_with_prefix(
+            request_id, max_tokens, prompt_token_ids, reserved_tokens
+        )
         if matched is None:
             return None
         if self.recurrent is not None:

@@ -89,6 +89,11 @@ def _parser() -> argparse.ArgumentParser:
         help="paged KV capacity; on CUDA defaults to what --memory-fraction leaves free",
     )
     parser.add_argument(
+        "--preemption",
+        action="store_true",
+        help="admit by prefill size and preempt + recompute the newest request when KV runs out",
+    )
+    parser.add_argument(
         "--memory-fraction",
         type=float,
         default=0.85,
@@ -334,6 +339,7 @@ def _scheduler_config(
         speculative_ngram_min_match=args.speculative_ngram_min_match,
         speculative_ngram_max_match=args.speculative_ngram_max_match,
         speculative_mtp_steps=args.speculative_mtp_steps,
+        enable_preemption=getattr(args, "preemption", False),
     )
 
 

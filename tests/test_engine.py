@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from mysglang.core import FinishReason, RequestState
+from mysglang.core import FinishReason, Request, RequestState, SamplingParams
 from mysglang.scheduler import Scheduler, SchedulerConfig
 from tests.helpers import drain_scheduler, make_model, make_request, reference_generate
 
@@ -304,6 +304,58 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(prefix.match_prefix([1, 2, 3, 4], record=False).cached_len, 0)
         self.assertEqual(prefix.match_prefix([5, 6, 7, 8], record=False).cached_len, 4)
         scheduler.check_integrity()
+
+
+class PreemptionTest(unittest.TestCase):
+    """Overcommitted admission must preempt and recompute without changing any output."""
+
+    PROMPTS = {
+        "a": [1, 2, 3, 4, 5],
+        "b": [6, 7, 8, 9, 10],
+        "c": [11, 12, 13, 14, 15],
+        "d": [16, 17, 18, 19, 20],
+    }
+
+    def _run(self, *, preemption: bool, num_pages: int, sampling=None):
+        model = make_model()
+        scheduler = Scheduler(
+            model,
+            SchedulerConfig(
+                max_running_requests=4,
+                prefill_token_budget=16,
+                num_pages=num_pages,
+                page_size=4,
+                enable_preemption=preemption,
+            ),
+        )
+        for request_id, prompt in self.PROMPTS.items():
+            params = SamplingParams(max_new_tokens=12, **(sampling or {}).get(request_id, {}))
+            scheduler.add(Request.from_token_ids(request_id, prompt, params))
+        outputs = drain_scheduler(scheduler)
+        self.assertEqual(scheduler.cache.allocator.stats.request_count, 0)
+        return model, scheduler, outputs
+
+    @torch.inference_mode()
+    def test_greedy_outputs_match_oracle_under_preemption(self) -> None:
+        # 每个请求最坏 5 + 12 = 17 个 token = 5 页；10 页不抢占时最多同时跑 2 个。
+        model, scheduler, outputs = self._run(preemption=True, num_pages=10)
+        self.assertGreater(scheduler.stats.preempted_requests, 0)
+        self.assertGreater(scheduler.stats.max_decode_batch_size, 2)
+        self.assertEqual(scheduler.stats.aborted_requests, 0)
+        for request_id, prompt in self.PROMPTS.items():
+            self.assertEqual(outputs[request_id], reference_generate(model, prompt, 12))
+
+    @torch.inference_mode()
+    def test_random_sampling_is_unchanged_by_preemption(self) -> None:
+        sampling = {
+            request_id: {"temperature": 0.9, "top_k": 8, "seed": 100 + index}
+            for index, request_id in enumerate(self.PROMPTS)
+        }
+        _, baseline, expected = self._run(preemption=False, num_pages=40, sampling=sampling)
+        self.assertEqual(baseline.stats.preempted_requests, 0)
+        _, scheduler, outputs = self._run(preemption=True, num_pages=10, sampling=sampling)
+        self.assertGreater(scheduler.stats.preempted_requests, 0)
+        self.assertEqual(outputs, expected)
 
 
 def drain_scheduler_after_add(scheduler: Scheduler, request) -> dict[str, list[int]]:

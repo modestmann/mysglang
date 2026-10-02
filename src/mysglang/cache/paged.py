@@ -112,6 +112,9 @@ class _Allocation:
     max_tokens: int
     reserved_pages: int
     shared_prefix_pages: int
+    # 额度覆盖到第几个 token。不抢占时等于 max_tokens（最坏情况一次预留）；
+    # 开抢占时准入只覆盖 prefill，decode 每步用 grow_reservation 往上涨。
+    reserved_tokens: int = 0
 
 
 class PageAllocator:
@@ -177,18 +180,22 @@ class PageAllocator:
         *,
         initial_pages: Sequence[int] = (),
         reserved_pages: int | None = None,
+        reserved_tokens: int | None = None,
     ) -> bool:
         self._validate_new_request_id(request_id)
         if max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
+        reserved_tokens = max_tokens if reserved_tokens is None else reserved_tokens
+        if not 0 < reserved_tokens <= max_tokens:
+            raise ValueError("reserved_tokens must be in (0, max_tokens]")
         prefix = tuple(initial_pages)
         if len(prefix) != len(set(prefix)):
             raise ValueError("initial_pages must be unique")
         if any(page not in self._cached_pages for page in prefix):
             raise ValueError("initial_pages must already belong to the prefix cache")
-        total_pages = self.pages_for_tokens(max_tokens)
+        total_pages = self.pages_for_tokens(reserved_tokens)
         if len(prefix) > total_pages:
-            raise ValueError("initial_pages exceed the request's maximum page count")
+            raise ValueError("initial_pages exceed the request's reserved page count")
         needed = total_pages - len(prefix) if reserved_pages is None else reserved_pages
         if needed < 0 or needed + len(prefix) != total_pages:
             raise ValueError("reserved_pages must cover the non-prefix request pages")
@@ -199,16 +206,46 @@ class PageAllocator:
             max_tokens=max_tokens,
             reserved_pages=needed,
             shared_prefix_pages=len(prefix),
+            reserved_tokens=reserved_tokens,
         )
+        return True
+
+    def reservation_growth(self, request_id: str, num_tokens: int) -> int:
+        """Extra pages the reservation needs before the request may hold ``num_tokens``."""
+        self._validate_known_request(request_id)
+        allocation = self._allocations[request_id]
+        if num_tokens > allocation.max_tokens:
+            raise PageAllocationError(
+                f"request {request_id!r} exceeds its maximum length: "
+                f"{num_tokens} > {allocation.max_tokens}"
+            )
+        if num_tokens <= allocation.reserved_tokens:
+            return 0
+        return self.pages_for_tokens(num_tokens) - self.pages_for_tokens(
+            allocation.reserved_tokens
+        )
+
+    def grow_reservation(self, request_id: str, num_tokens: int) -> bool:
+        """Extend a reservation to ``num_tokens``; False (nothing changed) if the pool is full."""
+        extra = self.reservation_growth(request_id, num_tokens)
+        allocation = self._allocations[request_id]
+        if num_tokens <= allocation.reserved_tokens:
+            return True
+        if extra > self.stats.admission_available_pages:
+            return False
+        allocation.reserved_tokens = num_tokens
+        allocation.reserved_pages += extra
         return True
 
     def ensure_capacity(self, request_id: str, num_tokens: int) -> tuple[int, ...]:
         self._validate_known_request(request_id)
         allocation = self._allocations[request_id]
-        if num_tokens > allocation.max_tokens:
+        # num_tokens：这个请求接下来总共要放多少个 token（不是"新增多少"）
+        # reserved_tokens：额度覆盖到的 token 数；不抢占时就是 prompt_len + max_new_tokens
+        if num_tokens > allocation.reserved_tokens:
             raise PageAllocationError(
                 f"request {request_id!r} exceeds its token reservation: "
-                f"{num_tokens} > {allocation.max_tokens}"
+                f"{num_tokens} > {allocation.reserved_tokens}"
             )
         needed = self.pages_for_tokens(num_tokens)#放 num_tokens 个 token 一共需要几页
         table = allocation.page_table#请求的页表
@@ -268,7 +305,7 @@ class PageAllocator:
         displaced = tuple(table[: len(prefix)])
         table[: len(prefix)] = prefix
         allocation.shared_prefix_pages = len(prefix)
-        allocation.reserved_pages = self.pages_for_tokens(allocation.max_tokens) - len(prefix)
+        allocation.reserved_pages = self.pages_for_tokens(allocation.reserved_tokens) - len(prefix)
         still_referenced = {
             page for allocation in self._allocations.values() for page in allocation.page_table
         }
@@ -307,9 +344,11 @@ class PageAllocator:
         if reserved_pages > self.num_pages:
             raise RuntimeError("reserved pages exceed physical pool capacity")
         for allocation in self._allocations.values():
-            total_pages = self.pages_for_tokens(allocation.max_tokens)
+            if not 0 < allocation.reserved_tokens <= allocation.max_tokens:
+                raise RuntimeError("request reservation exceeds its maximum length")
+            total_pages = self.pages_for_tokens(allocation.reserved_tokens)
             if len(allocation.page_table) > total_pages:
-                raise RuntimeError("allocated pages exceed request maximum length")
+                raise RuntimeError("allocated pages exceed the request reservation")
             if not 0 <= allocation.shared_prefix_pages <= len(allocation.page_table):
                 raise RuntimeError("shared prefix exceeds the request page table")
             if allocation.reserved_pages != total_pages - allocation.shared_prefix_pages:
@@ -428,6 +467,7 @@ class PagedKVCache:
         initial_pages: Sequence[int] = (),
         initial_length: int = 0,
         reserved_pages: int | None = None,
+        reserved_tokens: int | None = None,
     ) -> bool:
         prefix = tuple(initial_pages)
         if initial_length < 0 or initial_length % self.page_size != 0:
@@ -439,6 +479,7 @@ class PagedKVCache:
             max_tokens,
             initial_pages=prefix,
             reserved_pages=reserved_pages,
+            reserved_tokens=reserved_tokens,
         )
         if reserved:
             self._lengths[request_id] = [initial_length] * self.num_layers

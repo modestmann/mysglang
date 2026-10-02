@@ -52,6 +52,23 @@ class RequestLifecycleTest(unittest.TestCase):
         with self.assertRaises(InvalidStateTransition):
             request.start_prefill()
 
+    def test_preempt_keeps_outputs_and_resumes(self) -> None:
+        request = Request.from_token_ids("request", [1, 2], SamplingParams(max_new_tokens=3))
+        request.start_prefill()
+        request.start_decode()
+        request.record_token(7)
+        request.preempt()
+        self.assertEqual(request.state, RequestState.WAITING)
+        self.assertEqual(request.output_token_ids, (7,))
+        self.assertEqual(request.all_token_ids, (1, 2, 7))
+
+        request.start_prefill()
+        request.start_decode()
+        self.assertEqual(request.record_token(8).output_index, 1)
+        self.assertEqual(request.record_token(9).finish_reason, FinishReason.LENGTH)
+        with self.assertRaises(InvalidStateTransition):
+            request.preempt()
+
     def test_validation_and_prompt_ownership(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_new_tokens"):
             SamplingParams(max_new_tokens=0)

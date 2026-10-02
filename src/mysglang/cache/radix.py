@@ -345,9 +345,16 @@ class RadixPagedKVCache(PagedKVCache):#继承 PagedKVCache，把"树"和"allocat
             return RadixCacheHandle(0, self.prefix_cache.root)
         return self.prefix_cache.match_prefix(token_ids, record=record)
 
-    def can_reserve_request(self, max_tokens: int, prompt_token_ids: Sequence[int]) -> bool:
+    def can_reserve_request(
+        self,
+        max_tokens: int,
+        prompt_token_ids: Sequence[int],
+        reserved_tokens: int | None = None,
+    ) -> bool:#准入前查询空位置
         handle = self._match(prompt_token_ids[:-1], record=False)
-        total_pages = self.allocator.pages_for_tokens(max_tokens)
+        total_pages = self.allocator.pages_for_tokens(
+            max_tokens if reserved_tokens is None else reserved_tokens
+        )
         private_pages = total_pages - len(handle.pages)
         newly_protected = self._newly_protected_pages(handle)
         stats = self.prefix_cache.stats
@@ -359,10 +366,13 @@ class RadixPagedKVCache(PagedKVCache):#继承 PagedKVCache，把"树"和"allocat
         request_id: str,
         max_tokens: int,
         prompt_token_ids: Sequence[int],
+        reserved_tokens: int | None = None,
     ) -> int | None:
-        handle = self._match(prompt_token_ids[:-1], record=True)
-        self.prefix_cache.lock(handle)
-        total_pages = self.allocator.pages_for_tokens(max_tokens)
+        handle = self._match(prompt_token_ids[:-1], record=True)#禁止匹配最后一个token
+        self.prefix_cache.lock(handle)#加锁
+        total_pages = self.allocator.pages_for_tokens(
+            max_tokens if reserved_tokens is None else reserved_tokens
+        )
         private_pages = total_pages - len(handle.pages)
         committed = (
             self.allocator.stats.reserved_pages
@@ -378,14 +388,27 @@ class RadixPagedKVCache(PagedKVCache):#继承 PagedKVCache，把"树"和"allocat
             initial_pages=handle.pages,
             initial_length=handle.cached_len,
             reserved_pages=private_pages,
-        )
+            reserved_tokens=reserved_tokens,
+        )#更改allocation
         if not reserved:
             self.prefix_cache.unlock(handle)
             return None
         self._handles[request_id] = handle
         return handle.cached_len
 
-    def ensure_capacity(self, request_id: str, num_tokens: int) -> tuple[int, ...]:
+    def can_grow_reservation(self, request_id: str, num_tokens: int) -> bool:
+        """Whether the pool can commit pages for ``num_tokens`` (evicting idle cache if needed)."""
+        extra = self.allocator.reservation_growth(request_id, num_tokens)
+        committed = self.allocator.stats.reserved_pages + self.prefix_cache.stats.protected_pages
+        return committed + extra <= self.num_pages
+
+    def grow_reservation(self, request_id: str, num_tokens: int) -> bool:
+        # 与准入同一套记账：未被锁的缓存页算可用，真正领页时 ensure_capacity 再按 LRU 淘汰。
+        if not self.can_grow_reservation(request_id, num_tokens):
+            return False
+        return self.allocator.grow_reservation(request_id, num_tokens)
+
+    def ensure_capacity(self, request_id: str, num_tokens: int) -> tuple[int, ...]:#	每步 forward 前	领物理页
         table = self.allocator.page_table(request_id)
         needed = self.allocator.pages_for_tokens(num_tokens)
         additional = max(0, needed - len(table))
