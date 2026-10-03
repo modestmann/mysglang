@@ -344,6 +344,69 @@ class HybridSchedulerTest(unittest.TestCase):
                     self.assertGreater(stats.speculative_draft_forwards, 0)
 
     @torch.inference_mode()
+    def test_prefix_cache_restores_deltanet_state_snapshots(self) -> None:
+        rng = random.Random(31)
+        shared = [rng.randrange(48) for _ in range(13)]  # 13 个 token：快照边界 12（3 页）
+        prompts = {
+            "first": shared + [5, 6, 7],
+            "second": shared + [9, 1],
+            "third": shared[:9] + [40, 41, 42, 43, 44],  # 只共享 2 页：要在中间切节点
+        }
+        for moe, steps in ((False, 0), (True, 0), (False, 2)):
+            with self.subTest(moe=moe, mtp_steps=steps):
+                model = make_hybrid(moe=moe, mtp=bool(steps))
+                expected = {key: reference_generate(model, p, 6) for key, p in prompts.items()}
+                scheduler = Scheduler(
+                    model,
+                    SchedulerConfig(
+                        max_running_requests=2,
+                        prefill_token_budget=16,
+                        num_pages=40,
+                        page_size=4,
+                        speculative_mtp_steps=steps,
+                        state_snapshots=4,
+                    ),
+                )
+                outputs = {}
+                for key, prompt in prompts.items():
+                    scheduler.add(make_request(key, prompt, 6))
+                    outputs.update(drain_scheduler(scheduler))
+                self.assertEqual(outputs, expected)
+                # first 读全部 16 个，在 12 处存快照；second（15 个）命中这 12 个、只读 3 个；
+                # third 只和 first 共享 9 个 token：radix 在 8 处切出的节点没有快照，命中 0，
+                # 读全部 14 个，并在自己的边界 12 处再存一份快照。
+                self.assertEqual(scheduler.prefill_input_tokens, 16 + 3 + 14)
+                self.assertEqual(scheduler.cache.recurrent.free_snapshots, 4 - 2)
+                scheduler.check_integrity()
+
+    @torch.inference_mode()
+    def test_state_snapshot_pool_full_and_eviction_keep_outputs_exact(self) -> None:
+        rng = random.Random(32)
+        prompts = {f"r{i}": [rng.randrange(48) for _ in range(9)] for i in range(4)}
+        prompts["again"] = list(prompts["r0"])
+        model = make_hybrid()
+        expected = {key: reference_generate(model, p, 5) for key, p in prompts.items()}
+        scheduler = Scheduler(
+            model,
+            SchedulerConfig(
+                max_running_requests=1,
+                prefill_token_budget=16,
+                num_pages=8,  # 页很少：缓存的前缀会被 LRU 淘汰，快照要跟着还回去
+                page_size=4,
+                state_snapshots=2,  # 快照池比前缀少：满了要丢最久没用的快照
+            ),
+        )
+        outputs = {}
+        for key, prompt in prompts.items():
+            scheduler.add(make_request(key, prompt, 5))
+            outputs.update(drain_scheduler(scheduler))
+        self.assertEqual(outputs, expected)
+        self.assertGreater(scheduler.cache.prefix_cache.stats.evicted_pages, 0)
+        scheduler.check_integrity()
+        scheduler.cache.reset_prefix_cache()
+        self.assertEqual(scheduler.cache.recurrent.free_snapshots, 2)
+
+    @torch.inference_mode()
     def test_preemption_recomputes_state_slots_and_mtp_draft_kv(self) -> None:
         prompts, lengths = self._prompts(), [12, 7, 15, 20]
         for steps in (0, 1, 3):
@@ -523,6 +586,7 @@ def _hybrid_tp_worker(
                 num_pages=32,
                 page_size=2,
                 speculative_mtp_steps=mtp_steps,
+                state_snapshots=4,  # 各 rank 在同样的边界存快照、按同样顺序分配编号
             ),
         )
         if rank != 0:

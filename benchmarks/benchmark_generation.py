@@ -52,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--cuda-graph-batch-sizes", type=int, nargs="+")
     parser.add_argument("--preemption", action="store_true")
+    parser.add_argument("--state-snapshots", type=int, default=0)
     parser.add_argument(
         "--stop-at-eos",
         action="store_true",
@@ -302,6 +303,7 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "cuda_graph": args.cuda_graph,
             "cuda_graph_batch_sizes": args.cuda_graph_batch_sizes,
             "preemption": args.preemption,
+            "state_snapshots": args.state_snapshots,
             "stop_at_eos": args.stop_at_eos,
             "speculative_ngram": {
                 "max_tokens": args.speculative_ngram_max_tokens,

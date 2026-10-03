@@ -98,7 +98,10 @@ class RecurrentStatePool:
         device: torch.device | str,
         ssm_dtype: torch.dtype = torch.float32,
         scratch_slots: int = 0,
+        num_snapshots: int = 0,
     ) -> None:
+        if num_snapshots < 0:
+            raise ValueError("num_snapshots must be non-negative")
         if scratch_slots not in (0, 1):
             raise ValueError("scratch_slots must be 0 or 1")
         dimensions = {
@@ -126,6 +129,19 @@ class RecurrentStatePool:
         self._num_slots = num_slots
         self._free_slots = list(range(num_slots))
         self._slots: dict[str, int] = {}
+        # 前缀快照：在 prefill 停在整页边界时把格子复制一份，挂在 radix 节点上；
+        # 新请求命中该前缀时复制回自己的格子，等于"已经读完这段前缀"。
+        self.snapshot_conv = torch.zeros(
+            (num_layers, num_snapshots, conv_dim, conv_kernel_size - 1),
+            dtype=conv_dtype,
+            device=device,
+        )
+        self.snapshot_ssm = torch.zeros(
+            (num_layers, num_snapshots, num_heads, head_k_dim, head_v_dim),
+            dtype=ssm_dtype,
+            device=device,
+        )
+        self._free_snapshots = list(range(num_snapshots))
 
     @property
     def num_slots(self) -> int:
@@ -149,10 +165,40 @@ class RecurrentStatePool:
 
     @property
     def memory_bytes(self) -> int:
-        return (
-            self.conv_states.numel() * self.conv_states.element_size()
-            + self.ssm_states.numel() * self.ssm_states.element_size()
-        )
+        tensors = (self.conv_states, self.ssm_states, self.snapshot_conv, self.snapshot_ssm)
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+
+    @property
+    def num_snapshots(self) -> int:
+        return self.snapshot_ssm.size(1)
+
+    @property
+    def free_snapshots(self) -> int:
+        return len(self._free_snapshots)
+
+    def save_snapshot(self, request_id: str) -> int | None:
+        """把请求格子的当前状态复制成一个快照；快照池满了返回 None。"""
+        if not self._free_snapshots:
+            return None
+        snapshot = min(self._free_snapshots)  # 最小编号优先，TP 各 rank 一致
+        self._free_snapshots.remove(snapshot)
+        slot = self.slot(request_id)
+        self.snapshot_conv[:, snapshot].copy_(self.conv_states[:, slot])
+        self.snapshot_ssm[:, snapshot].copy_(self.ssm_states[:, slot])
+        return snapshot
+
+    def load_snapshot(self, snapshot: int, request_id: str) -> None:
+        """把快照复制进请求自己的格子（命中前缀时用）。"""
+        if snapshot in self._free_snapshots:
+            raise ValueError(f"recurrent snapshot {snapshot} is not in use")
+        slot = self.slot(request_id)
+        self.conv_states[:, slot].copy_(self.snapshot_conv[:, snapshot])
+        self.ssm_states[:, slot].copy_(self.snapshot_ssm[:, snapshot])
+
+    def release_snapshot(self, snapshot: int) -> None:
+        if snapshot in self._free_snapshots or not 0 <= snapshot < self.num_snapshots:
+            raise ValueError(f"cannot release recurrent snapshot {snapshot}")
+        self._free_snapshots.append(snapshot)
 
     @property
     def stats(self) -> RecurrentStateStats:

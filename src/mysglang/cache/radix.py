@@ -37,6 +37,9 @@ class _RadixNode:
         self.ref_count = 0
         self.timestamp = timestamp
         self.node_id = node_id
+        # 混合模型：恰好读完"root 到本节点末尾"这段前缀时的 DeltaNet 状态快照编号。
+        # 切分时快照跟着原节点（末尾不变）走，新建的前半段没有快照。
+        self.snapshot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,8 @@ class RadixPrefixCache:#只管"树"
         self._matched_tokens = 0
         self._insert_requests = 0
         self._evicted_pages = 0
+        # 淘汰 / 重置时被释放的快照编号，由持有快照池的缓存取走归还。
+        self.released_snapshots: list[int] = []
 
     @property
     def stats(self) -> RadixCacheStats:
@@ -176,6 +181,9 @@ class RadixPrefixCache:#只管"树"
             del parent.children[self._edge_key(node.key)]# 把它从父节点上摘掉
             node.parent = None
             evicted.extend(node.pages)  # 它的页记为已淘汰
+            if node.snapshot is not None:
+                self.released_snapshots.append(node.snapshot)  # 节点没了，快照也一起还
+                node.snapshot = None
             if parent is not self.root and not parent.children and parent.ref_count == 0:
                 heapq.heappush(leaves, (parent.timestamp, parent.node_id, parent))  # 父节点刚变成叶子，也加入候选
 
@@ -186,6 +194,9 @@ class RadixPrefixCache:#只管"树"
         if self.stats.protected_pages:
             raise RuntimeError("cannot reset while prefix handles are locked")
         pages = tuple(sorted(self.pages))
+        self.released_snapshots.extend(
+            node.snapshot for node in self._nodes() if node.snapshot is not None
+        )
         self.root = self._new_node()
         self.root.ref_count = 1
         return pages

@@ -94,6 +94,12 @@ def _parser() -> argparse.ArgumentParser:
         help="admit by prefill size and preempt + recompute the newest request when KV runs out",
     )
     parser.add_argument(
+        "--state-snapshots",
+        type=int,
+        default=8,
+        help="DeltaNet state snapshots kept for hybrid-model prefix reuse (0 disables it)",
+    )
+    parser.add_argument(
         "--memory-fraction",
         type=float,
         default=0.85,
@@ -278,6 +284,7 @@ def _auto_num_pages(
     page_size: int,
     memory_fraction: float,
     max_running_requests: int,
+    state_snapshots: int = 0,
 ) -> int:
     if not 0 < memory_fraction <= 1:
         raise ValueError("--memory-fraction must be in (0, 1]")
@@ -293,7 +300,8 @@ def _auto_num_pages(
     # 整张卡留出 (1 − memory_fraction) 给激活、CUDA Graph 和其他进程，再扣掉还没分配的格子池。
     free, total = torch.cuda.mem_get_info(parameter.device)
     budget = free - total * (1 - memory_fraction)
-    budget -= _recurrent_pool_bytes(model, max_running_requests)
+    # 快照和格子一样大，也在 Scheduler 里才分配。
+    budget -= _recurrent_pool_bytes(model, max_running_requests + state_snapshots)
 
     num_pages = int(budget // bytes_per_page)
     if model.tensor_parallel.enabled:
@@ -320,7 +328,11 @@ def _scheduler_config(
     if num_pages is None:
         if model is not None and model.embed_tokens.weight.is_cuda:
             num_pages = _auto_num_pages(
-                model, page_size, getattr(args, "memory_fraction", 0.85), args.max_running_requests
+                model,
+                page_size,
+                getattr(args, "memory_fraction", 0.85),
+                args.max_running_requests,
+                getattr(args, "state_snapshots", 0),
             )
             default_prefill_budget = _AUTO_PREFILL_TOKEN_BUDGET
             print(
@@ -350,6 +362,7 @@ def _scheduler_config(
         speculative_ngram_max_match=args.speculative_ngram_max_match,
         speculative_mtp_steps=args.speculative_mtp_steps,
         enable_preemption=getattr(args, "preemption", False),
+        state_snapshots=getattr(args, "state_snapshots", 0),
     )
 
 

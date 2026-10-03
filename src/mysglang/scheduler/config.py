@@ -24,6 +24,10 @@ class SchedulerConfig:
     # 页不够时抢占最后准入的请求，放回等待队首，之后用 prompt + 已生成 token 重新 prefill。
     # 关闭时（默认）按 prompt + max_new_tokens 最坏情况预留，永不抢占。
     enable_preemption: bool = False
+    # 混合模型（DeltaNet）前缀复用：最多保存多少份 DeltaNet 状态快照；
+    # 0 表示关闭（混合模型不复用前缀）。
+    # 快照只在 prefill 停在"能进 radix 树的最长整页前缀"末尾时保存，命中时复制回新请求的格子。
+    state_snapshots: int = 0
 
     def __post_init__(self) -> None:
         for name in (

@@ -159,6 +159,7 @@ class Scheduler:
                 recurrent=recurrent_spec,
                 num_recurrent_slots=config.max_running_requests,
                 num_draft_layers=model.num_draft_kv_layers if self._mtp_steps else 0,
+                num_state_snapshots=config.state_snapshots if recurrent_spec is not None else 0,
                 **cache_arguments,
             )
         else:
@@ -324,9 +325,6 @@ class Scheduler:
         if request.multimodal is not None:
             if self.model.visual is None:
                 raise ValueError("image input requires a model loaded with enable_vision")
-            if self.cache.enable_prefix_cache:
-                # 图片占位 token 的 ID 都相同，按 token 前缀复用会把不同图片的 K/V 混用。
-                raise ValueError("image input requires prefix caching to be disabled")
 
     def add(self, request: Request) -> None:
         self.validate(request)
@@ -427,6 +425,16 @@ class Scheduler:
             self._admission_tokens(request),
         )
 
+    def _snapshot_boundary(self, entry: _Entry) -> int:
+        """能进 radix 树的最长整页前缀长度（去掉最后一个 token 再按页向下对齐）；0 表示不存快照。"""
+        # 图片请求的占位 token id 都一样，还没有按图片区分的钥匙，先不发布（#5 再做）。
+        if not getattr(self.cache, "supports_state_snapshots", False):
+            return 0
+        if entry.request.multimodal is not None:
+            return 0
+        page_size = self.config.page_size
+        return (len(entry.prefill_tokens) - 1) // page_size * page_size
+
     def _admission_tokens(self, request: Request) -> int | None:
         """准入时额度覆盖多少 token；None 表示按 prompt + max_new_tokens 最坏情况一次预留。"""
         # 图片请求重算要重新处理 M-RoPE 与视觉替换，暂不参与抢占：仍按最坏情况预留。
@@ -447,6 +455,10 @@ class Scheduler:
             fair_share = max(1, remaining_budget // requests_left)
             start = entry.prefill_offset
             end = min(start + fair_share, len(entry.prefill_tokens))
+            # 混合模型前缀复用：块跨过快照边界时截在边界，那一刻的 S 才能和缓存的整页前缀配套。
+            boundary = self._snapshot_boundary(entry)
+            if start < boundary < end:
+                end = boundary
             chunks.append((entry, start, end))
             remaining_budget -= end - start
 
@@ -558,6 +570,9 @@ class Scheduler:
             request_id = request.request_id
             entry.prefill_offset = end
             self._prefilling.pop(request_id)
+            if end == self._snapshot_boundary(entry):
+                # 这一块刚好停在边界：发布这段整页前缀，并把此刻格子里的 S 存成快照挂上去。
+                self.cache.publish_with_snapshot(request_id, entry.prefill_tokens[:end])
 
             if end == len(entry.prefill_tokens):
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
