@@ -248,7 +248,7 @@ class RecurrentStatePool:
     ) -> RecurrentStateBatch:
         requests = tuple(request_ids)
         padding = buffer.batch_size - len(requests)
-        if not requests or padding < 0:
+        if padding < 0:
             raise ValueError("request batch size does not match the recurrent decode buffer")
         if padding and self.scratch_slot is None:
             raise ValueError("padding a Decode batch requires a scratch recurrent slot")

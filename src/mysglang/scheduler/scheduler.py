@@ -182,6 +182,9 @@ class Scheduler:
             if config.decode_cuda_graph_batch_sizes
             else None
         )
+        if self._cuda_graph_runner is not None:
+            # 启动时就把所有 Decode 桶录好；TP 各 rank 按相同顺序录，Graph 内的 NCCL 保持一致。
+            self._cuda_graph_runner.capture_all()
         # MTP 每轮 verify 的形状固定为 [batch, 1 + k]，同样可以按精确 batch size 捕获。
         self._verify_graph_runner = (#开投机 ①：主模型验证
             DecodeCudaGraphRunner(

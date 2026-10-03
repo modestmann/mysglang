@@ -173,6 +173,26 @@ class DecodeCudaGraphRunner:
         result = self.run_positions(input_token_ids, request_ids)
         return tuple(tokens[-1] for tokens in result.token_ids)
 
+    @torch.inference_mode()
+    def capture_all(self) -> None:
+        """启动时预录所有桶：每个桶用一个全是假请求的 batch 录一次，避免服务中途懒捕获卡顿。"""
+        if not self._pad_to_bucket:
+            return  # 精确大小的图（MTP 那几张）没有补齐，仍在第一次用到时录
+        for size in self._sorted_sizes:
+            bucket = self._buckets[size]
+            if bucket.graph is not None:
+                continue
+            # 0 个真请求：整个桶都是只读写垃圾页 / 垃圾格子的假请求，
+            # 所以不用像 run_positions 那样存档、读档 S，录完也没有长度要 commit。
+            batch = self.cache.prepare_decode_batch((), bucket.metadata, commit_lengths=False)
+            state_batch = (
+                None
+                if bucket.state is None
+                else self._recurrent.prepare_decode_batch((), bucket.state)
+            )
+            bucket.input_ids.zero_()
+            self._capture(bucket, batch, state_batch)
+
     @torch.inference_mode()#主函数
     def run_positions(
         self,

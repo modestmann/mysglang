@@ -47,6 +47,7 @@ class PagedKVBatch:
     rope_positions: torch.Tensor | None = None
     mrope_positions: torch.Tensor | None = None
     # CUDA Graph 补齐用的假请求行数：排在真请求之后，只写垃圾页，不参与 commit。
+    # 补齐时 append_lengths 覆盖全部行（真 + 假），request_ids / starts / ends 只有真请求。
     padding_rows: int = 0
 
     @property
@@ -55,8 +56,7 @@ class PagedKVBatch:
 
     @property
     def total_tokens(self) -> int:
-        width = self.append_lengths[0] if self.append_lengths else 0
-        return sum(self.append_lengths) + self.padding_rows * width
+        return sum(self.append_lengths)
 
     @property
     def max_append_length(self) -> int:
@@ -64,7 +64,7 @@ class PagedKVBatch:
 
     @property
     def max_end(self) -> int:
-        return max(self.ends)
+        return max(self.ends, default=0)
 
     @property
     def uniform_append_length(self) -> int:
@@ -516,6 +516,8 @@ class PagedKVCache:
 
     def layer_lengths(self, layer_idx: int, request_ids: Sequence[str]) -> tuple[int, ...]:
         self._validate_layer(layer_idx)
+        if not request_ids:
+            return ()  # 全是假请求的 batch（预录 Graph）
         requests = self._validate_requests(request_ids)
         return tuple(self._lengths[request_id][layer_idx] for request_id in requests)
 
@@ -610,18 +612,21 @@ class PagedKVCache:
         Fewer requests than the buffer holds are padded with dummy rows that write only
         the scratch page (length 0, block table = [scratch]) and are never committed.
         """
-        requests = self._validate_requests(request_ids)
+        requests = tuple(request_ids)
+        if requests:
+            self._validate_requests(requests)
         if buffer._owner_token is not self._batch_owner_token:
             raise ValueError("paged KV decode buffer belongs to a different cache")
         padding = buffer.batch_size - len(requests)
-        if not requests or padding < 0:
+        # 允许 0 个真请求：启动时预录 Graph 就用一个全是假请求的 batch。
+        if padding < 0:
             raise ValueError("request batch size does not match the decode buffer")
         if padding and self.scratch_page is None:
             raise ValueError("padding a Decode batch requires a cache with a scratch page")
         if len(set(requests)) != len(requests):
             raise ValueError("request_ids must be unique within a batch")
 
-        starts = self.lengths(requests)
+        starts = self.lengths(requests) if requests else ()
         append_length = buffer.append_length
         ends = tuple(start + append_length for start in starts)
         tables = tuple(self.allocator.page_table(request_id) for request_id in requests)
@@ -679,7 +684,7 @@ class PagedKVCache:
         return PagedKVBatch(
             request_ids=requests,
             starts=starts,
-            append_lengths=(append_length,) * len(requests),
+            append_lengths=(append_length,) * buffer.batch_size,
             ends=ends,
             block_table=buffer.block_table,
             cache_seqlens=buffer.cache_seqlens,
@@ -975,7 +980,8 @@ class PagedKVCache:
     def _validate_batch(self, batch: PagedKVBatch) -> None:
         if batch._owner_token is not self._batch_owner_token:
             raise ValueError("paged KV batch belongs to a different cache")
-        self._validate_requests(batch.request_ids)
+        if batch.request_ids or not batch.padding_rows:
+            self._validate_requests(batch.request_ids)  # 全是假请求的预录 batch 可以没有真请求
 
 
 class PagedKVCompanion(PagedKVCache):

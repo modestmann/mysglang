@@ -264,6 +264,9 @@ class AttentionBackendTest(unittest.TestCase):
             flash, SchedulerConfig(**padded_base, decode_cuda_graph_batch_sizes=(4,))
         )
         self.assertEqual(padded.cache.scratch_page, 6)
+        # 启动时就用全是假请求的 batch 录好，之后跑真请求不再捕获。
+        self.assertEqual(padded.stats.cuda_graph_captures, 1)
+        self.assertEqual(padded.stats.cuda_graph_replays, 0)
         padded_prompts = {
             "pad-a": ([5] * 40, 3),
             "pad-b": ([9] * 70, 6),
