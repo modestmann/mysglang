@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -421,19 +422,23 @@ class Scheduler:
         request = self._waiting[0].request
         return self.cache.can_reserve_request(
             self._max_request_tokens(request),
-            request.all_token_ids,
+            self._cache_key(request, request.all_token_ids),
             self._admission_tokens(request),
         )
 
     def _snapshot_boundary(self, entry: _Entry) -> int:
         """能进 radix 树的最长整页前缀长度（去掉最后一个 token 再按页向下对齐）；0 表示不存快照。"""
-        # 图片请求的占位 token id 都一样，还没有按图片区分的钥匙，先不发布（#5 再做）。
         if not getattr(self.cache, "supports_state_snapshots", False):
-            return 0
-        if entry.request.multimodal is not None:
             return 0
         page_size = self.config.page_size
         return (len(entry.prefill_tokens) - 1) // page_size * page_size
+
+    @staticmethod
+    def _cache_key(request: Request, tokens: Sequence[int]) -> tuple[int, ...]:
+        """radix 前缀缓存用的钥匙：图片占位 token 换成按图片像素算出的指纹 id。"""
+        if request.multimodal is None:
+            return tuple(tokens)
+        return request.multimodal.cache_key(tokens)
 
     def _admission_tokens(self, request: Request) -> int | None:
         """准入时额度覆盖多少 token；None 表示按 prompt + max_new_tokens 最坏情况一次预留。"""
@@ -572,11 +577,14 @@ class Scheduler:
             self._prefilling.pop(request_id)
             if end == self._snapshot_boundary(entry):
                 # 这一块刚好停在边界：发布这段整页前缀，并把此刻格子里的 S 存成快照挂上去。
-                self.cache.publish_with_snapshot(request_id, entry.prefill_tokens[:end])
+                key = self._cache_key(request, entry.prefill_tokens[:end])
+                self.cache.publish_with_snapshot(request_id, key)
 
             if end == len(entry.prefill_tokens):
                 # Prompt 的完整页现在就发布并锁住；无需等长 Decode 全部结束即可复用。
-                self.cache.publish_prefix(request_id, entry.prefill_tokens)
+                self.cache.publish_prefix(
+                    request_id, self._cache_key(request, entry.prefill_tokens)
+                )
                 request.start_decode()
                 next_token = next_token_ids[token_offset]
                 token_offset += 1
@@ -609,16 +617,17 @@ class Scheduler:
             # 首次准入是 prompt；被抢占过的请求还要带上已生成的 token 一起重算。
             tokens = request.all_token_ids
             reserved_tokens = self._admission_tokens(request)
+            key = self._cache_key(request, tokens)
             if not self.cache.can_reserve_request(
                 self._max_request_tokens(request),
-                tokens,
+                key,
                 reserved_tokens,
             ):
                 break
             matched = self.cache.reserve_request_with_prefix(
                 request.request_id,
                 self._max_request_tokens(request),
-                tokens,
+                key,
                 reserved_tokens,
             )
             if matched is None:
@@ -660,7 +669,9 @@ class Scheduler:
         request.preempt()
         # 先把写满的页插进 radix 再释放，重算时能命中自己的前缀；
         # 混合模型关着前缀缓存，就是从头算。
-        self.cache.finish_request(request_id, request.all_token_ids)
+        self.cache.finish_request(
+            request_id, self._cache_key(request, request.all_token_ids)
+        )
         entry.prefill_offset = 0
         entry.prefill_tokens = ()
         entry.mtp_draft = entry.mtp_hidden = entry.mtp_draft_prob = None
@@ -1283,7 +1294,10 @@ class Scheduler:
         entry.vision_features = None
         if request_id in self.cache.allocator.request_ids:# 还持有页才释放
             if finished:
-                self.cache.finish_request(request_id, request.all_token_ids) # 正常结束：把页交给 radix 缓存
+                # 正常结束：把页交给 radix 缓存
+                self.cache.finish_request(
+                    request_id, self._cache_key(request, request.all_token_ids)
+                )
             else:
                 self.cache.release_request(request_id)  # abort：直接归还
         self._entries.pop(request_id, None) # 从总表里删除

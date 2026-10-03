@@ -286,6 +286,56 @@ class MultimodalSchedulerTest(unittest.TestCase):
                     self.assertGreater(scheduler.stats.speculative_verify_forwards, 0)
 
     @torch.inference_mode()
+    def test_prefix_cache_keys_images_by_pixel_fingerprint(self) -> None:
+        model = make_vl(seed=9)
+        cat = random_image(48, 48, 21)
+        car = random_image(48, 48, 22)  # 尺寸相同 → 占位 token 完全一样，只有像素不同
+        prompts = {
+            "cat": image_prompt([cat], text=(5, 6, 7)),
+            "cat-again": image_prompt([cat], text=(8, 9)),
+            "car": image_prompt([car], text=(5, 6, 7)),
+        }
+        self.assertEqual(prompts["cat"][0], prompts["car"][0])  # token id 一模一样
+        self.assertNotEqual(
+            prompts["cat"][1].cache_key(prompts["cat"][0]),
+            prompts["car"][1].cache_key(prompts["car"][0]),
+        )
+        # 只截一段前缀（快照边界切在图片中间）时，钥匙也要能算，且是整段钥匙的前缀。
+        tokens, multimodal = prompts["cat"]
+        middle = multimodal.image_token_positions[len(multimodal.image_token_positions) // 2]
+        self.assertEqual(
+            multimodal.cache_key(tokens[:middle]), multimodal.cache_key(tokens)[:middle]
+        )
+        expected = {
+            key: multimodal_reference(model, tokens, multimodal, 5)
+            for key, (tokens, multimodal) in prompts.items()
+        }
+        scheduler = Scheduler(
+            model,
+            SchedulerConfig(
+                max_running_requests=1,
+                prefill_token_budget=64,
+                num_pages=64,
+                page_size=4,
+                state_snapshots=4,
+            ),
+        )
+        outputs, prefilled = {}, {}
+        for key, (tokens, multimodal) in prompts.items():
+            before = scheduler.prefill_input_tokens
+            scheduler.add(Request.from_token_ids(key, tokens, SamplingParams(5), multimodal))
+            outputs.update(drain_scheduler(scheduler))
+            prefilled[key] = scheduler.prefill_input_tokens - before
+        self.assertEqual(outputs, expected)
+        cat_length = len(prompts["cat"][0])
+        self.assertEqual(prefilled["cat"], cat_length)
+        # 同一张图：命中到图片之后的整页边界，只重算后面一小段（含图片在内的前缀都复用了）。
+        self.assertLess(prefilled["cat-again"], 8)
+        # 不同的图：钥匙在第一个图片 token 处就分叉，只能复用图片之前的纯文字（不足一页 → 0）。
+        self.assertEqual(prefilled["car"], cat_length)
+        scheduler.check_integrity()
+
+    @torch.inference_mode()
     def test_abort_during_image_prefill_releases_everything(self) -> None:
         model = make_vl(seed=8)
         tokens, multimodal = image_prompt([random_image(48, 48, 6)])

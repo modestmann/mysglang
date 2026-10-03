@@ -16,12 +16,14 @@ The pipeline mirrors the Hugging Face ``Qwen2VLImageProcessorPil`` + Qwen3.5 mod
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +47,36 @@ class MultimodalInputs:
     @property
     def num_image_tokens(self) -> int:
         return len(self.image_token_positions)
+
+    @cached_property
+    def image_cache_ids(self) -> tuple[int, ...]:
+        """每个图片占位 token 在前缀缓存钥匙里用的 id：同一张图共用一个由像素指纹生成的负数。
+
+        占位 token 的 id 全一样，直接拿来当 radix 的钥匙会把不同图片当成同一个前缀；
+        换成指纹后，同一张图（同一段像素、同样的网格）才会命中。负数不会和词表 id 冲突。
+        """
+        patches_per_token = self.pixel_values.size(0) // max(1, self.num_image_tokens)
+        ids: list[int] = []
+        offset = 0
+        for t, h, w in self.image_grid_thw:
+            patches = t * h * w
+            digest = hashlib.sha256(repr((t, h, w)).encode())
+            digest.update(self.pixel_values[offset : offset + patches].numpy().tobytes())
+            image_id = -1 - int.from_bytes(digest.digest()[:7], "big")
+            ids.extend([image_id] * (patches // patches_per_token))
+            offset += patches
+        if len(ids) != self.num_image_tokens:
+            raise ValueError("image grids disagree with the number of image tokens")
+        return tuple(ids)
+
+    def cache_key(self, token_ids: Sequence[int]) -> tuple[int, ...]:
+        """把 token 序列里的图片占位换成指纹 id，作为 radix 前缀缓存的钥匙（不送进模型）。"""
+        key = list(token_ids)
+        for position, image_id in zip(self.image_token_positions, self.image_cache_ids):
+            if position >= len(key):
+                break  # 只截了一段前缀（快照边界可能切在图片中间）
+            key[position] = image_id
+        return tuple(key)
 
 
 def load_image(source):
