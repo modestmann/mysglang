@@ -501,15 +501,21 @@ class HybridCudaGraphTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_graph_paths_match_eager_generation(self) -> None:
-        from mysglang import FlashAttentionBackend
+        from mysglang import FlashAttentionBackend, FlashInferBackend
 
-        for moe, steps in ((False, 0), (False, 3), (True, 2)):
-            with self.subTest(moe=moe, steps=steps):
+        cases = [
+            ("flash", 256, 32, moe, steps) for moe, steps in ((False, 0), (False, 3), (True, 2))
+        ]
+        if importlib.util.find_spec("flashinfer") is not None:
+            # FlashInfer：小页（16）+ 它支持的 head_dim 64；verify / 草稿 / 追赶都走它的 kernel。
+            cases += [("flashinfer", 16, 64, False, 0), ("flashinfer", 16, 64, False, 3)]
+        for backend_name, page_size, head_dim, moe, steps in cases:
+            with self.subTest(backend=backend_name, moe=moe, steps=steps):
                 torch.manual_seed(50)
                 config = hybrid_config(
                     moe=moe,
                     mtp=True,
-                    head_dim=32,
+                    head_dim=head_dim,
                     linear_key_head_dim=16,
                     linear_value_head_dim=16,
                     max_position_embeddings=512,
@@ -517,7 +523,11 @@ class HybridCudaGraphTest(unittest.TestCase):
                 )
                 model = Qwen3ForCausalLM(
                     config,
-                    attention_backend=FlashAttentionBackend(),
+                    attention_backend=(
+                        FlashInferBackend()
+                        if backend_name == "flashinfer"
+                        else FlashAttentionBackend()
+                    ),
                     moe_dispatch_backend="triton_grouped",
                     enable_mtp=True,
                 )
@@ -532,8 +542,8 @@ class HybridCudaGraphTest(unittest.TestCase):
                         SchedulerConfig(
                             max_running_requests=4,
                             prefill_token_budget=256,
-                            num_pages=8,
-                            page_size=256,
+                            num_pages=2048 // page_size,
+                            page_size=page_size,
                             speculative_mtp_steps=steps,
                             decode_cuda_graph_batch_sizes=sizes,
                         ),

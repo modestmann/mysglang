@@ -34,7 +34,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("benchmarks/results/raw.jsonl"))
     parser.add_argument("--name", default="generation")
-    parser.add_argument("--backend", choices=("flash", "torch", "auto"), default="flash")
+    parser.add_argument(
+        "--backend", choices=("flash", "flashinfer", "torch", "auto"), default="flash"
+    )
+    parser.add_argument("--page-size", type=int)
     parser.add_argument(
         "--moe-dispatch",
         choices=("naive", "sorted", "grouped", "triton_grouped", "all_to_all"),
@@ -46,7 +49,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--num-pages", type=int, default=256)
+    parser.add_argument("--num-pages", type=int, help="默认按 --kv-tokens / page size 换算")
+    parser.add_argument(
+        "--kv-tokens",
+        type=int,
+        default=65536,
+        help="KV 池容量（token）；按页数给默认值会让小页后端的容量缩水 256/16 倍",
+    )
     parser.add_argument("--prefill-token-budget", type=int)
     parser.add_argument("--warmup-new-tokens", type=int, default=4)
     parser.add_argument("--cuda-graph", action="store_true")
@@ -289,6 +298,7 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
         "config": {
             "model": str(args.model.resolve()),
             "backend": args.backend,
+            "page_size": args.page_size,
             "moe_dispatch": args.moe_dispatch,
             "dtype": args.dtype,
             "world_size": int(os.environ.get("WORLD_SIZE", "1")),
@@ -355,8 +365,17 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _resolve_kv_pool(args: argparse.Namespace) -> None:
+    """固定 KV 容量（token 数），页大小随 backend 变化时 A/B 才公平；结果里记下实际值。"""
+    if args.page_size is None:
+        args.page_size = 256 if args.backend == "flash" else 16
+    if args.num_pages is None:
+        args.num_pages = max(1, args.kv_tokens // args.page_size)
+
+
 async def _main(args: argparse.Namespace) -> None:
     args.max_running_requests = args.concurrency
+    _resolve_kv_pool(args)
     if not args.cuda_graph:
         args.decode_cuda_graph_batch_sizes = ()
     elif args.cuda_graph_batch_sizes:

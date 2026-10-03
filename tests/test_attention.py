@@ -372,3 +372,92 @@ class AttentionBackendTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FLASHINFER_AVAILABLE = importlib.util.find_spec("flashinfer") is not None
+
+
+@unittest.skipUnless(
+    FLASHINFER_AVAILABLE and torch.cuda.is_available(), "requires CUDA and flashinfer"
+)
+class FlashInferBackendTest(unittest.TestCase):
+    """FlashInfer must reproduce the torch oracle at any page size, eager and under Graph."""
+
+    def test_paged_kv_csr(self) -> None:
+        from mysglang.modeling.attention import paged_kv_csr
+
+        self.assertEqual(
+            paged_kv_csr([[3, 0, 5, 8], [7], [2, 9]], [10, 4, 6], 4),
+            ([0, 3, 4, 6], [3, 0, 5, 7, 2, 9], [2, 4, 2]),
+        )
+
+    def test_matches_torch_backend_at_small_page_sizes(self) -> None:
+        self._check_against_torch(num_attention_heads=4, num_key_value_heads=2)
+
+    def test_tensor_core_decode_for_unsupported_group_size(self) -> None:
+        # 组大小 5（如 Qwen3-14B 的 40/8）不在非 TC decode kernel 的编译列表里，必须走 tensor core
+        self._check_against_torch(num_attention_heads=5, num_key_value_heads=1)
+
+    @torch.inference_mode()
+    def _check_against_torch(self, num_attention_heads: int, num_key_value_heads: int) -> None:
+        from mysglang import FlashInferBackend
+
+        config = ModelConfig(
+            vocab_size=64,
+            hidden_size=256,
+            intermediate_size=256,
+            num_layers=2,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=64,
+            max_position_embeddings=512,
+        )
+        torch.manual_seed(2028)
+        reference = Qwen3ForCausalLM(config, attention_backend=TorchAttentionBackend())
+        reference = reference.cuda().half().eval()
+        shared = [index % 64 for index in range(37)]
+        prompts = {
+            "a": shared + [1, 2, 3],
+            "b": shared + [4, 5],  # 与 a 共享 37 个 token：小页时能命中前缀
+            "c": [(index * 7) % 64 for index in range(90)],
+            "d": [9] * 5,
+        }
+        for page_size in (16, 1):
+            for graph_sizes in ((), (1, 2, 4)):
+                with self.subTest(page_size=page_size, graph=graph_sizes):
+                    base = dict(
+                        max_running_requests=4,
+                        prefill_token_budget=24,  # 分块 prefill，并与 decode 拼成混合步
+                        num_pages=600 // page_size,
+                        page_size=page_size,
+                    )
+                    # 每个子测试用全新的 backend：图在任何 eager forward 之前录制
+                    # （与线上启动顺序一致）。之前共用 backend 时 eager 子测试先建好
+                    # workspace，掩盖了 wrapper 被释放的 bug。
+                    backend = FlashInferBackend()
+                    flashinfer = Qwen3ForCausalLM(config, attention_backend=backend)
+                    flashinfer.load_state_dict(reference.state_dict())
+                    flashinfer = flashinfer.cuda().half().eval()
+                    outputs = []
+                    schedulers = (
+                        Scheduler(reference, SchedulerConfig(**base)),
+                        Scheduler(
+                            flashinfer,
+                            SchedulerConfig(**base, decode_cuda_graph_batch_sizes=graph_sizes),
+                        ),
+                    )
+                    captured = dict(backend._graph_wrappers)
+                    self.assertEqual(len(captured), len(graph_sizes))
+                    for scheduler in schedulers:
+                        for request_id, prompt in prompts.items():
+                            scheduler.add(make_request(request_id, prompt, max_new_tokens=6))
+                        outputs.append(drain_scheduler(scheduler))
+                        scheduler.check_integrity()
+                    self.assertEqual(outputs[1], outputs[0])
+                    if graph_sizes:
+                        self.assertGreater(schedulers[1].stats.cuda_graph_replays, 0)
+                    # 图里固化了录制时 wrapper 缓冲区的地址：eager prefill 之后必须还是同一批对象
+                    for key, wrapper in captured.items():
+                        self.assertIs(backend._graph_wrappers[key], wrapper)
+                    schedulers[1].close()
+                    self.assertEqual(backend._graph_wrappers, {})

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass
+from itertools import count
 
 import torch
 import torch.distributed as dist
@@ -14,8 +15,9 @@ from mysglang.cache import (
     RecurrentStateBatch,
 )
 
-from .attention import FlashAttentionBackend
 from .qwen3 import Qwen3ForCausalLM
+
+_RUNNER_IDS = count()
 
 
 @dataclass
@@ -78,8 +80,15 @@ class DecodeCudaGraphRunner:
         parameter = model.embed_tokens.weight
         if parameter.device.type != "cuda" or not torch.cuda.is_available():
             raise RuntimeError("Decode CUDA Graph requires a CUDA model")
-        if not isinstance(model.attention_backend, FlashAttentionBackend):
-            raise RuntimeError("Decode CUDA Graph requires FlashAttentionBackend")
+        if not getattr(model.attention_backend, "supports_cuda_graph", False):
+            raise RuntimeError(
+                "Decode CUDA Graph requires a graph-capable attention backend (flash / flashinfer)"
+            )
+        # FlashInfer 在图外按每批 metadata 规划，需要知道本 rank 的 query 头数。
+        self._graph_owner = next(_RUNNER_IDS)  # 不用 id(self)：runner 回收后 id 可能被复用
+        self._num_qo_heads = next(
+            layer.self_attn.num_heads for layer in model.layers if layer.self_attn is not None
+        )
         if model.config.is_moe and model.moe_dispatch_backend != "triton_grouped":
             raise RuntimeError(
                 "MoE Decode CUDA Graph requires --moe-dispatch triton_grouped"
@@ -162,6 +171,9 @@ class DecodeCudaGraphRunner:
             bucket.output_hidden = None
             bucket.output_logits = None
         torch.cuda.synchronize(device)
+        release = getattr(self.model.attention_backend, "release_graphs", None)
+        if release is not None:
+            release(self._graph_owner)
 
     @torch.inference_mode()
     def run(
@@ -191,6 +203,7 @@ class DecodeCudaGraphRunner:
                 else self._recurrent.prepare_decode_batch((), bucket.state)
             )
             bucket.input_ids.zero_()
+            self._prepare_attention(size, batch)
             self._capture(bucket, batch, state_batch)
 
     @torch.inference_mode()#主函数
@@ -224,6 +237,8 @@ class DecodeCudaGraphRunner:
             else self._recurrent.prepare_decode_batch(request_ids, bucket.state)
         )
         # Graph bucket 的地址保持不变，每轮只更新其中的内容。
+        # 规划 attention metadata 必须在图外、捕获和每次重放之前（FlashInfer；FA2 什么都不做）。
+        self._prepare_attention(size, batch)
         # 假请求输入 token 0：算出来什么都无所谓，结果不会被读。
         padded_tokens = tuple(input_token_ids) + (0,) * (padding * self.append_length)
         bucket.input_ids.copy_(
@@ -254,6 +269,11 @@ class DecodeCudaGraphRunner:
         self.cache.commit_batch(batch) # ⑤ GPU 确定写完了，CPU 才把每个请求的 _lengths 推进一步（只做这一次）
         self._replays += 1
         return GraphDecodeResult(token_ids, hidden, state_batch, logits)
+
+    def _prepare_attention(self, size: int, batch: PagedKVBatch) -> None:
+        prepare = getattr(self.model.attention_backend, "prepare_graph", None)
+        if prepare is not None:
+            prepare((self._graph_owner, size), self.cache, batch, self._num_qo_heads)
 
     @staticmethod
     def _real_rows(bucket: _DecodeBucket, batch_size: int):

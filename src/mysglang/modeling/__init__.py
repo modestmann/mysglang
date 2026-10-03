@@ -1,4 +1,9 @@
-from .attention import AttentionBackend, FlashAttentionBackend, TorchAttentionBackend
+from .attention import (
+    AttentionBackend,
+    FlashAttentionBackend,
+    FlashInferBackend,
+    TorchAttentionBackend,
+)
 from .cuda_graph import DecodeCudaGraphRunner, DecodeCudaGraphStats
 from .loader import CheckpointLoadReport, load_huggingface_state_dict
 from .parallel import ColumnParallelLinear, RowParallelLinear, TensorParallelContext
@@ -11,6 +16,7 @@ __all__ = [
     "DecodeCudaGraphRunner",
     "DecodeCudaGraphStats",
     "FlashAttentionBackend",
+    "FlashInferBackend",
     "Qwen3ForCausalLM",
     "RowParallelLinear",
     "TensorParallelContext",

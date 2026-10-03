@@ -48,6 +48,7 @@ import torch.distributed as dist
 from mysglang.config import ModelConfig
 from mysglang.modeling import (
     FlashAttentionBackend,
+    FlashInferBackend,
     Qwen3ForCausalLM,
     TensorParallelContext,
     TorchAttentionBackend,
@@ -69,7 +70,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, default=_default_model_path())
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default=None)
-    parser.add_argument("--backend", choices=("auto", "flash", "torch"), default="auto")
+    parser.add_argument(
+        "--backend", choices=("auto", "flash", "flashinfer", "torch"), default="auto"
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        help="tokens per KV page (default: 256 for flash, which FA2 requires; 16 otherwise)",
+    )
     parser.add_argument(
         "--moe-dispatch",
         choices=("naive", "sorted", "grouped", "triton_grouped", "all_to_all"),
@@ -191,6 +199,8 @@ def _make_backend(name: str, device: torch.device):
         and device.type == "cuda"
         and importlib.util.find_spec("flash_attn") is not None
     )
+    if name == "flashinfer":
+        return FlashInferBackend()
     return FlashAttentionBackend() if use_flash else TorchAttentionBackend()
 
 
@@ -322,7 +332,9 @@ def _scheduler_config(
     backend,
     model: Qwen3ForCausalLM | None = None,
 ) -> SchedulerConfig:
-    page_size = 256 if isinstance(backend, FlashAttentionBackend) else 16
+    page_size = getattr(args, "page_size", None) or (
+        256 if isinstance(backend, FlashAttentionBackend) else 16
+    )
     num_pages = args.num_pages
     default_prefill_budget = None
     if num_pages is None:
@@ -399,11 +411,11 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
     device = _rank_device(args.device, launch)
     dtype = _resolve_dtype(args.dtype, device)
     backend = _make_backend(args.backend, device)
-    if isinstance(backend, FlashAttentionBackend) and dtype not in {
+    if isinstance(backend, (FlashAttentionBackend, FlashInferBackend)) and dtype not in {
         torch.float16,
         torch.bfloat16,
     }:
-        raise ValueError("FlashAttention requires --dtype float16 or bfloat16")
+        raise ValueError("flash / flashinfer backends require --dtype float16 or bfloat16")
     owns_process_group = False
     tensor_parallel = TensorParallelContext()
     control_group: dist.ProcessGroup | None = None

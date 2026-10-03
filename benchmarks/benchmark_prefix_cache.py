@@ -25,8 +25,15 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from benchmark_generation import (
+    _consume,
+    _resolve_kv_pool,
+    _run_text,
+)
+from benchmark_generation import (
+    _parser as _generation_parser,
+)
 
-from benchmark_generation import _consume, _parser as _generation_parser, _run_text
 from mysglang.cli import _load_runtime
 
 
@@ -37,7 +44,7 @@ def _parser():
         output=Path("benchmarks/results/prefix-cache.jsonl"),
         name="prefix-cache",
         max_new_tokens=16,
-        num_pages=16,
+        kv_tokens=4096,
     )
     parser.add_argument("--prefix-tokens", type=int, default=1024)
     parser.add_argument("--suffix-tokens", type=int, default=64)
@@ -103,6 +110,7 @@ def _summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 async def _main(args: Any) -> None:
     args.max_running_requests = 1
     args.decode_cuda_graph_batch_sizes = ()
+    _resolve_kv_pool(args)
     runtime = _load_runtime(args)
     if runtime.scheduler is not None and not runtime.scheduler.is_driver:
         raise RuntimeError("run this benchmark with a single rank")
@@ -126,6 +134,7 @@ async def _main(args: Any) -> None:
                 "requests": args.requests,
                 "max_new_tokens": args.max_new_tokens,
                 "num_pages": args.num_pages,
+                "page_size": args.page_size,
             },
             "cold": _summary(cold),
             "warm": _summary(warm),
