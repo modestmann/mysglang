@@ -160,7 +160,7 @@ KV address    = pool[layer, 1, 2]
 
 模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FA2 varlen kernel 再直接按 block table 读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。
+当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。`FlashInferBackend`（`--backend flashinfer --page-size 16|1`）用 CSR 页表（indptr / indices / last_page_len）支持任意页大小，每次 forward 规划一次、各层共用；CUDA Graph 下每个 bucket 一个固定缓冲区的 wrapper，plan 在图外执行。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。
 
 ### Decode metadata buffer 与 CUDA Graph
 
@@ -193,7 +193,7 @@ static cache_seqlens / positions / slot_mapping / cu_seqlens
 
 每轮仍由 Scheduler 选择请求，并在 Graph 外把新值原地写入这些 buffer；replay 中的 FA2 kernel 会从相同地址读取本轮的新内容。地址不变不等于值不变。`Qwen3ForCausalLM.forward_prepared()` 让 eager 和 Graph 共用已经准备好的 `PagedKVBatch`，避免模型内部重新分配 metadata。未配置 Graph 的纯 Decode 也按 batch size 复用这套 metadata buffer。
 
-当前只捕获配置 `decode_cuda_graph_batch_sizes=(...)` 中的精确大小。例如只配置 `(2, 4)` 时，batch 2/4 走 Graph，batch 1/3 走 eager；不会向较大 bucket 填 dummy request，因为 dummy token 还会牵涉页表、KV 写入和采样语义。某个 bucket 第一次命中时先 warmup/capture，后续才摊薄这次成本，所以 bucket 应由 workload 命中率决定，而不是越多越好。
+普通 Decode 图按 bucket 补齐：batch 向上取最近的已录大小（`bisect_left`），多出来的行是假请求，block table 指向专用的垃圾页（DeltaNet 指向垃圾状态格子），长度为 0、只写垃圾页、不参与 `commit_batch()`，输出只取前 `batch_size` 行。启动时 `capture_all()` 用全假请求 batch 预录全部 bucket，避免第一次命中某个大小时现场捕获造成 ITL 尖峰（最大 ITL 125 → 17 ms）。MTP 的 verify/草稿/追赶图仍只录精确大小。CLI 默认 bucket 为 1、2、4 加 8 的倍数直到 `max_running_requests`。
 
 Graph replay 不会再次执行 capture 时的 Python。各层 backend 因此在 Graph 内只写物理 KV，不推进 Python 维护的逻辑长度；输出 token 同步成功后，`commit_batch()` 才一次性提交所有层长度。若 kernel 失败，逻辑长度仍停在旧值。混合 Prefill/Decode 的 token 数和分段形状经常变化，当前继续使用 packed eager 路径，不进入 Decode Graph。
 
@@ -552,7 +552,7 @@ Admission 同时预留页和 slot（slot 数 = `max_running_requests`），完�
 
 Kernel 选择与 attention backend 相同的两层结构：PyTorch reference 对多 token 段用 chunk 算法（与 HF 相同），对 Decode/verify 用逐 token 递归；CUDA 上默认使用 fla（flash-linear-attention）的 varlen chunk 与 fused recurrent kernel。
 
-**为什么混合模型关闭 radix 前缀复用。** Radix 复用依赖"前缀的缓存可以按页截取"。K/V 满足这一点，递归状态不满足：它只在"恰好处理到这个位置"时有效，无法从页面恢复。当前 `HybridPagedKVCache` 把 `enable_prefix_cache` 设为 False（仍走同一套 reservation/handle 路径，只是永远匹配根节点）。后续若要复用，需要在 radix 节点上存状态快照（SGLang 的 MambaRadixCache 思路）。
+**为什么混合模型关闭 radix 前缀复用。** Radix 复用依赖"前缀的缓存可以按页截取"。K/V 满足这一点，递归状态不满足：它只在"恰好处理到这个位置"时有效，无法从页面恢复。因此默认（`--state-snapshots 0`）`HybridPagedKVCache` 关闭前缀复用（仍走同一套 reservation/handle 路径，只是永远匹配根节点）。`--state-snapshots N` 打开后，在 radix 节点上存状态快照（SGLang MambaRadixCache 的思路）：prefill 只在整页边界停下时把当前 DeltaNet 状态存进快照池并挂到节点上；匹配退回到路径上最深的有快照节点，命中后把快照复制进请求自己的 slot；快照池满时丢最久未用且无锁的快照（KV 页保留），节点被淘汰时快照随之归还。
 
 ### 投机验证与状态回滚
 
@@ -687,7 +687,7 @@ Scheduler：首个 Prefill chunk 时 encode_images（ViT + 合并器）一次，
   grouped/all-to-all 也已完成 CUDA A/B，当前无 P2P/SHM 拓扑上均慢于 sorted；
   vocab parallel、worker 超时与故障恢复尚未完成；
 - HTTP 协议尚未由正式模型客户端与数据集评测；
-- Qwen3.5/3.6 混合模型关闭 radix 前缀复用（递归状态无法从页面恢复）；
+- Qwen3.5/3.6 混合模型默认关闭 radix 前缀复用（递归状态无法从页面恢复），`--state-snapshots` 打开后只在整页边界的快照处命中；
 - 图片输入只在 Qwen3.5-0.8B 上验收，35B 的视觉塔（27 层）尚未实测；不支持视频；视觉编码在调度 worker 中同步执行，没有独立的编码 batch；
 - MTP 每步只起草一条链（topk=1），尚未实现草稿树；
 - FP8 为 W8A16（权重 1 字节，激活仍为 BF16），尚未使用 Ada/Hopper 的 FP8 tensor core；
