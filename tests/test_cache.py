@@ -90,6 +90,35 @@ class PagedKVCacheTest(unittest.TestCase):
         self.assertEqual(self.cache.allocator.page_table("rollback"), table)
         self.cache.check_integrity()
 
+    def test_padded_decode_rows_only_touch_the_scratch_page(self) -> None:
+        cache = PagedKVCache(
+            num_layers=1,
+            num_pages=4,
+            page_size=4,
+            num_kv_heads=1,
+            head_dim=2,
+            dtype=torch.float32,
+            device="cpu",
+            scratch_pages=1,
+        )
+        self.assertEqual((cache.num_pages, cache.scratch_page), (4, 4))
+        self.assertEqual(cache.allocator.stats.total_pages, 4)
+        cache.reserve_request("real", 8)
+        cache.ensure_capacity("real", 6)
+        cache.truncate("real", 0)
+        cache._lengths["real"] = [5]
+        buffer = cache.allocate_decode_buffer(3, max_blocks=2)
+        batch = cache.prepare_decode_batch(("real",), buffer, commit_lengths=False)
+
+        self.assertEqual((batch.batch_size, batch.padding_rows, batch.total_tokens), (3, 2, 3))
+        self.assertEqual(buffer.cache_seqlens.tolist(), [5, 0, 0])
+        self.assertEqual(buffer.block_table[1:].tolist(), [[4, -1], [4, -1]])
+        real_slot = cache.allocator.page_table("real")[1] * 4 + 1
+        self.assertEqual(buffer.slot_mapping.tolist(), [real_slot, 16, 16])
+        cache.commit_batch(batch)
+        self.assertEqual(cache.lengths(("real",)), (6,))
+        cache.check_integrity()
+
     @torch.inference_mode()
     def test_decode_metadata_buffer_keeps_addresses_and_commits_once(self) -> None:
         for request_id, prompt in (("a", [1, 2, 3]), ("b", [4])):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 
 import torch
@@ -72,6 +73,7 @@ class DecodeCudaGraphRunner:
         warmup_steps: int = 2,
         append_length: int = 1,
         return_hidden: bool = False,
+        pad_to_bucket: bool = False,
     ) -> None:
         parameter = model.embed_tokens.weight
         if parameter.device.type != "cuda" or not torch.cuda.is_available():
@@ -93,6 +95,11 @@ class DecodeCudaGraphRunner:
         self.append_length = append_length
         self.return_hidden = return_hidden
         self._batch_sizes = frozenset(batch_sizes)
+        # 补齐：实际 batch 用第一个不小于它的桶，多出的行是只写垃圾页 / 垃圾格子的假请求。
+        self._sorted_sizes = tuple(sorted(batch_sizes))
+        self._pad_to_bucket = pad_to_bucket
+        if pad_to_bucket and getattr(cache, "scratch_page", None) is None:
+            raise ValueError("padded Decode CUDA Graphs require a cache with a scratch page")
         self._warmup_steps = warmup_steps
         self._recurrent = getattr(cache, "recurrent", None)
         speculative = append_length > 1
@@ -128,7 +135,16 @@ class DecodeCudaGraphRunner:
         return DecodeCudaGraphStats(captures=self._captures, replays=self._replays)
 
     def supports(self, batch_size: int) -> bool:
-        return batch_size in self._batch_sizes
+        return self.bucket_size(batch_size) is not None
+
+    def bucket_size(self, batch_size: int) -> int | None:
+        """这个 batch 用哪个桶；None 表示没有合适的桶，退回 eager。"""
+        if not self._pad_to_bucket:
+            return batch_size if batch_size in self._batch_sizes else None
+        # self._sorted_sizes 是从小到大排好的桶大小，例如 (1, 2, 4, 8)；
+        # 二分找第一个 >= batch_size 的（相当于 C++ std::lower_bound）。
+        index = bisect_left(self._sorted_sizes, batch_size)
+        return self._sorted_sizes[index] if index < len(self._sorted_sizes) else None
 
     def close(self) -> None:
         """Release captured graphs before their NCCL process group is destroyed."""
@@ -166,12 +182,16 @@ class DecodeCudaGraphRunner:
         rope_deltas: tuple[int, ...] | None = None,
     ) -> GraphDecodeResult:
         batch_size = len(request_ids)
-        if batch_size not in self._buckets:
+        size = self.bucket_size(batch_size)
+        if size is None:
             raise ValueError(f"no CUDA Graph bucket for Decode batch size {batch_size}")
         if len(input_token_ids) != batch_size * self.append_length:
             raise ValueError("Decode input tokens must match the bucket shape")
+        padding = size - batch_size
+        if padding and input_hidden is not None:
+            raise ValueError("MTP graphs are captured at exact batch sizes only")
 
-        bucket = self._buckets[batch_size] # 取出这个 batch 大小的桶
+        bucket = self._buckets[size] # 取出这个 batch 大小的桶
         batch = self.cache.prepare_decode_batch( # ① 把这一步的数据复制进桶里的固定地址
             request_ids,
             bucket.metadata,
@@ -184,8 +204,10 @@ class DecodeCudaGraphRunner:
             else self._recurrent.prepare_decode_batch(request_ids, bucket.state)
         )
         # Graph bucket 的地址保持不变，每轮只更新其中的内容。
+        # 假请求输入 token 0：算出来什么都无所谓，结果不会被读。
+        padded_tokens = tuple(input_token_ids) + (0,) * (padding * self.append_length)
         bucket.input_ids.copy_(
-            torch.tensor(input_token_ids, dtype=torch.long).view(batch_size, self.append_length)
+            torch.tensor(padded_tokens, dtype=torch.long).view(size, self.append_length)
         )
         if bucket.input_hidden is not None:
             if input_hidden is None:
@@ -208,12 +230,19 @@ class DecodeCudaGraphRunner:
         bucket.graph.replay()
 
         # CPU 需要 token，同时这个同步点保证所有层 KV 已写完，之后才能提交逻辑长度。
-        token_ids = tuple(tuple(row) for row in bucket.output_token_ids.tolist())
+        token_ids, hidden, logits = self._real_rows(bucket, batch_size)
         self.cache.commit_batch(batch) # ⑤ GPU 确定写完了，CPU 才把每个请求的 _lengths 推进一步（只做这一次）
         self._replays += 1
-        return GraphDecodeResult(
-            token_ids, bucket.output_hidden, state_batch, bucket.output_logits
-        )
+        return GraphDecodeResult(token_ids, hidden, state_batch, logits)
+
+    @staticmethod
+    def _real_rows(bucket: _DecodeBucket, batch_size: int):
+        """只取前 batch_size 行（真请求）的 token、hidden、logits；后面是假请求，扔掉。"""
+        rows = bucket.output_token_ids.tolist()
+        token_ids = tuple(tuple(row) for row in rows[:batch_size])
+        hidden = None if bucket.output_hidden is None else bucket.output_hidden[:batch_size]
+        logits = None if bucket.output_logits is None else bucket.output_logits[:batch_size]
+        return token_ids, hidden, logits
 
     @torch.inference_mode()
     def commit_states(

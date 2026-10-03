@@ -97,7 +97,10 @@ class RecurrentStatePool:
         conv_dtype: torch.dtype,
         device: torch.device | str,
         ssm_dtype: torch.dtype = torch.float32,
+        scratch_slots: int = 0,
     ) -> None:
+        if scratch_slots not in (0, 1):
+            raise ValueError("scratch_slots must be 0 or 1")
         dimensions = {
             "num_layers": num_layers,
             "num_slots": num_slots,
@@ -110,21 +113,27 @@ class RecurrentStatePool:
         if invalid := [name for name, value in dimensions.items() if value <= 0]:
             raise ValueError(f"recurrent state dimensions must be positive: {invalid}")
         self.conv_states = torch.zeros(
-            (num_layers, num_slots, conv_dim, conv_kernel_size - 1),
+            # 和 KV 的垃圾页同理：可多开 1 个格子（编号 = num_slots）给补齐用的假请求。
+            (num_layers, num_slots + scratch_slots, conv_dim, conv_kernel_size - 1),
             dtype=conv_dtype,
             device=device,
         )#是短卷积要记住的最近 3 个输入
         self.ssm_states = torch.zeros(
-            (num_layers, num_slots, num_heads, head_k_dim, head_v_dim),
+            (num_layers, num_slots + scratch_slots, num_heads, head_k_dim, head_v_dim),
             dtype=ssm_dtype,
             device=device,#层数、请求数、头数、每个头的S
         )#两个大tensor用来存gated deltanet的相关矩阵
+        self._num_slots = num_slots
         self._free_slots = list(range(num_slots))
         self._slots: dict[str, int] = {}
 
     @property
     def num_slots(self) -> int:
-        return self.ssm_states.size(1)
+        return self._num_slots
+
+    @property
+    def scratch_slot(self) -> int | None:
+        return self._num_slots if self.ssm_states.size(1) > self._num_slots else None
 
     @property
     def num_layers(self) -> int:
@@ -238,15 +247,19 @@ class RecurrentStatePool:
         buffer: RecurrentDecodeBuffer,
     ) -> RecurrentStateBatch:
         requests = tuple(request_ids)
-        if len(requests) != buffer.batch_size:
+        padding = buffer.batch_size - len(requests)
+        if not requests or padding < 0:
             raise ValueError("request batch size does not match the recurrent decode buffer")
-        slots = [self.slot(request_id) for request_id in requests]
+        if padding and self.scratch_slot is None:
+            raise ValueError("padding a Decode batch requires a scratch recurrent slot")
+        # 补齐的假请求行都读写垃圾格子；append_lengths 覆盖全部行，形状与 Graph 一致。
+        slots = [self.slot(request_id) for request_id in requests] + [self.scratch_slot] * padding
         buffer.slots.copy_(torch.tensor(slots, dtype=torch.long))
         return RecurrentStateBatch(
             pool=self,
             request_ids=requests,
             slots=buffer.slots,
-            append_lengths=(buffer.append_length,) * len(requests),
+            append_lengths=(buffer.append_length,) * buffer.batch_size,
             cu_seqlens=buffer.cu_seqlens,
             log=buffer.log,
         )

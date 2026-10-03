@@ -461,7 +461,9 @@ class HybridCudaGraphTest(unittest.TestCase):
                 model = model.to(device="cuda", dtype=torch.bfloat16).eval()
                 prompts = [list(range(3, 40)), list(range(10, 17)), list(range(20, 61))]
                 outputs = []
-                for graph in (False, True):
+                # ()：eager；(1, 2, 3, 4)：精确大小；(1, 4)：batch 2、3 向上补齐到 4。
+                for sizes in ((), (1, 2, 3, 4), (1, 4)):
+                    graph = bool(sizes)
                     scheduler = Scheduler(
                         model,
                         SchedulerConfig(
@@ -470,7 +472,7 @@ class HybridCudaGraphTest(unittest.TestCase):
                             num_pages=8,
                             page_size=256,
                             speculative_mtp_steps=steps,
-                            decode_cuda_graph_batch_sizes=(1, 2, 3, 4) if graph else (),
+                            decode_cuda_graph_batch_sizes=sizes,
                         ),
                     )
                     for index, prompt in enumerate(prompts):
@@ -490,6 +492,7 @@ class HybridCudaGraphTest(unittest.TestCase):
                         self.assertGreater(scheduler.stats.cuda_graph_replays, 0)
                     scheduler.close()
                 self.assertEqual(outputs[0], outputs[1])
+                self.assertEqual(outputs[0], outputs[2])
 
 
 def _hybrid_tp_worker(

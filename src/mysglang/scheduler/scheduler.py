@@ -149,6 +149,8 @@ class Scheduler:
             head_dim=model.config.head_dim,
             dtype=parameter.dtype,
             device=parameter.device,
+            # 开 Decode Graph 时多开 1 页垃圾页，给按桶补齐的假请求写 KV。
+            scratch_pages=1 if config.decode_cuda_graph_batch_sizes else 0,
         )
         self.cache: RadixPagedKVCache
         if recurrent_spec is not None or self._mtp_steps:
@@ -175,6 +177,7 @@ class Scheduler:
                 config.decode_cuda_graph_batch_sizes,
                 max_blocks=self._decode_max_blocks,
                 return_hidden=bool(self._mtp_steps),
+                pad_to_bucket=True,
             )
             if config.decode_cuda_graph_batch_sizes
             else None

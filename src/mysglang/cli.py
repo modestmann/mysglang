@@ -114,7 +114,8 @@ def _parser() -> argparse.ArgumentParser:
         "--cuda-graph-batch-sizes",
         type=int,
         nargs="+",
-        help="exact Decode batch sizes to capture with --cuda-graph (default: 1)",
+        help="Decode batch sizes to capture with --cuda-graph; smaller batches pad up to the "
+        "next size (default: 1, 2, 4, then every 8 up to --max-running-requests)",
     )
     parser.add_argument(
         "--speculative-ngram-max-tokens",
@@ -254,6 +255,13 @@ def _rank_device(name: str, launch: _DistributedLaunch) -> torch.device:
 _AUTO_PREFILL_TOKEN_BUDGET = 8192
 
 
+def _default_graph_batch_sizes(max_running_requests: int) -> tuple[int, ...]:
+    """1、2、4，之后每隔 8 一个，最后补上上限本身（mini-sglang 同款），实际 batch 向上补齐。"""
+    sizes = [size for size in (1, 2, 4) if size <= max_running_requests]
+    sizes += range(8, max_running_requests + 1, 8)
+    return tuple(sorted({*sizes, max_running_requests}))
+
+
 def _recurrent_pool_bytes(model: Qwen3ForCausalLM, num_slots: int) -> int:
     """DeltaNet 格子池的大小；它在 Scheduler 里才分配，测显存时还没占地方。"""
     spec = model.recurrent_state_spec
@@ -327,7 +335,9 @@ def _scheduler_config(
     )
     graph_batch_sizes = getattr(args, "decode_cuda_graph_batch_sizes", None)
     if graph_batch_sizes is None:
-        requested = getattr(args, "cuda_graph_batch_sizes", None) or (1,)
+        requested = getattr(args, "cuda_graph_batch_sizes", None) or _default_graph_batch_sizes(
+            args.max_running_requests
+        )
         graph_batch_sizes = tuple(sorted(set(requested))) if args.cuda_graph else ()
     return SchedulerConfig(
         max_running_requests=args.max_running_requests,

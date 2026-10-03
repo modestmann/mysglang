@@ -54,6 +54,7 @@ class HybridPagedKVCache(RadixPagedKVCache):
                 head_v_dim=recurrent.head_v_dim,
                 conv_dtype=self._keys.dtype,
                 device=self._keys.device,
+                scratch_slots=0 if self.scratch_page is None else 1,
             )
         self.draft: PagedKVCompanion | None = None#MTP的KVcache
         if num_draft_layers:
@@ -66,6 +67,7 @@ class HybridPagedKVCache(RadixPagedKVCache):
                 head_dim=self.head_dim,
                 dtype=self._keys.dtype,
                 device=self._keys.device,
+                scratch_pages=0 if self.scratch_page is None else 1,
             )
 
     @property

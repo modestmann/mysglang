@@ -50,6 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefill-token-budget", type=int)
     parser.add_argument("--warmup-new-tokens", type=int, default=4)
     parser.add_argument("--cuda-graph", action="store_true")
+    parser.add_argument("--cuda-graph-batch-sizes", type=int, nargs="+")
     parser.add_argument("--preemption", action="store_true")
     parser.add_argument(
         "--stop-at-eos",
@@ -299,6 +300,7 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "num_pages": args.num_pages,
             "prefill_token_budget": args.prefill_token_budget,
             "cuda_graph": args.cuda_graph,
+            "cuda_graph_batch_sizes": args.cuda_graph_batch_sizes,
             "preemption": args.preemption,
             "stop_at_eos": args.stop_at_eos,
             "speculative_ngram": {
@@ -353,7 +355,12 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 async def _main(args: argparse.Namespace) -> None:
     args.max_running_requests = args.concurrency
-    args.decode_cuda_graph_batch_sizes = (args.concurrency,) if args.cuda_graph else ()
+    if not args.cuda_graph:
+        args.decode_cuda_graph_batch_sizes = ()
+    elif args.cuda_graph_batch_sizes:
+        args.decode_cuda_graph_batch_sizes = tuple(sorted(set(args.cuda_graph_batch_sizes)))
+    else:
+        args.decode_cuda_graph_batch_sizes = (args.concurrency,)
     runtime = _load_runtime(args)
     try:
         if runtime.scheduler is not None and not runtime.scheduler.is_driver:

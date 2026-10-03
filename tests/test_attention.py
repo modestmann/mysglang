@@ -254,6 +254,31 @@ class AttentionBackendTest(unittest.TestCase):
         self.assertEqual(flash_graph.stats.cuda_graph_replays, 3)
         flash_graph.check_integrity()
 
+        # 只录 batch 4：3 个请求补 1 个假请求、之后 2 个请求补 2 个，结果必须与 eager 一致，
+        # 假请求只写垃圾页，真请求的页与长度不受影响。
+        padded_base = dict(
+            max_running_requests=4, prefill_token_budget=1024, num_pages=6, page_size=256
+        )
+        eager = Scheduler(reference, SchedulerConfig(**padded_base))
+        padded = Scheduler(
+            flash, SchedulerConfig(**padded_base, decode_cuda_graph_batch_sizes=(4,))
+        )
+        self.assertEqual(padded.cache.scratch_page, 6)
+        padded_prompts = {
+            "pad-a": ([5] * 40, 3),
+            "pad-b": ([9] * 70, 6),
+            "pad-c": ([13] * 25, 6),
+        }
+        for scheduler in (eager, padded):
+            for request_id, (prompt, new_tokens) in padded_prompts.items():
+                scheduler.add(make_request(request_id, prompt, max_new_tokens=new_tokens))
+        expected = drain_scheduler(eager)
+        actual = drain_scheduler(padded)
+        self.assertEqual(actual, expected)
+        self.assertEqual(padded.stats.cuda_graph_captures, 1)
+        self.assertGreaterEqual(padded.stats.cuda_graph_replays, 4)
+        padded.check_integrity()
+
     @unittest.skipUnless(
         FLASH_ATTN_AVAILABLE and TRITON_AVAILABLE and torch.cuda.is_available(),
         "requires CUDA, flash-attn and Triton",

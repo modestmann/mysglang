@@ -46,14 +46,17 @@ class PagedKVBatch:
     # 图片 prompt 的 prefill 为三轴 M-RoPE 位置（[3, tokens]）。纯文本两者都为 None。
     rope_positions: torch.Tensor | None = None
     mrope_positions: torch.Tensor | None = None
+    # CUDA Graph 补齐用的假请求行数：排在真请求之后，只写垃圾页，不参与 commit。
+    padding_rows: int = 0
 
     @property
     def batch_size(self) -> int:
-        return len(self.request_ids)
+        return len(self.request_ids) + self.padding_rows
 
     @property
     def total_tokens(self) -> int:
-        return sum(self.append_lengths)
+        width = self.append_lengths[0] if self.append_lengths else 0
+        return sum(self.append_lengths) + self.padding_rows * width
 
     @property
     def max_append_length(self) -> int:
@@ -382,7 +385,10 @@ class PagedKVCache:
         dtype: torch.dtype,
         device: torch.device | str,
         allocator: PageAllocator | None = None,
+        scratch_pages: int = 0,
     ) -> None:
+        if scratch_pages not in (0, 1):
+            raise ValueError("scratch_pages must be 0 or 1")
         dimensions = {
             "num_layers": num_layers,
             "num_pages": num_pages,
@@ -392,7 +398,9 @@ class PagedKVCache:
         }
         if invalid := [name for name, value in dimensions.items() if value <= 0]:
             raise ValueError(f"cache dimensions must be positive: {invalid}")
-        shape = (num_layers, num_pages, page_size, num_kv_heads, head_dim)
+        # 物理上可多开 1 页"垃圾页"（页号 = num_pages），给 CUDA Graph 补齐用的假请求写 KV；
+        # allocator 只管前 num_pages 页，准入与记账完全看不见它。
+        shape = (num_layers, num_pages + scratch_pages, page_size, num_kv_heads, head_dim)
         self._keys = torch.empty(shape, dtype=dtype, device=device)
         self._values = torch.empty_like(self._keys)# 真正的 KV 显存，全局唯一
         if allocator is None:
@@ -441,7 +449,12 @@ class PagedKVCache:
 
     @property
     def num_pages(self) -> int:
-        return self._keys.size(1)
+        return self.allocator.num_pages
+
+    @property
+    def scratch_page(self) -> int | None:
+        """假请求专用的物理页号；没开补齐时为 None。"""
+        return self.num_pages if self._keys.size(1) > self.num_pages else None
 
     @property
     def page_size(self) -> int:
@@ -592,12 +605,19 @@ class PagedKVCache:
         commit_lengths: bool = True,
         rope_deltas: Sequence[int] | None = None,
     ) -> PagedKVBatch:
-        """Fill fixed Decode metadata buffers without replacing their device tensors."""
+        """Fill fixed Decode metadata buffers without replacing their device tensors.
+
+        Fewer requests than the buffer holds are padded with dummy rows that write only
+        the scratch page (length 0, block table = [scratch]) and are never committed.
+        """
         requests = self._validate_requests(request_ids)
         if buffer._owner_token is not self._batch_owner_token:
             raise ValueError("paged KV decode buffer belongs to a different cache")
-        if len(requests) != buffer.batch_size:
+        padding = buffer.batch_size - len(requests)
+        if not requests or padding < 0:
             raise ValueError("request batch size does not match the decode buffer")
+        if padding and self.scratch_page is None:
+            raise ValueError("padding a Decode batch requires a cache with a scratch page")
         if len(set(requests)) != len(requests):
             raise ValueError("request_ids must be unique within a batch")
 
@@ -632,12 +652,21 @@ class PagedKVCache:
                     + position % self.page_size
                 )
             cumulative_k.append(cumulative_k[-1] + end)
+        for pad_index in range(len(requests), buffer.batch_size):
+            buffer.block_table[pad_index, 0] = self.scratch_page
+            positions.extend(range(append_length))
+            scratch_base = self.scratch_page * self.page_size
+            slots.extend(scratch_base + offset for offset in range(append_length))
+            cumulative_k.append(cumulative_k[-1] + append_length)
 
-        buffer.cache_seqlens.copy_(torch.tensor(starts, dtype=torch.int32))
+        buffer.cache_seqlens.copy_(
+            torch.tensor(starts + (0,) * padding, dtype=torch.int32)
+        )
         buffer.positions.copy_(torch.tensor(positions, dtype=torch.long))
-        deltas = rope_deltas or (0,) * len(requests)
+        deltas = tuple(rope_deltas or (0,) * len(requests))
         if len(deltas) != len(requests):
             raise ValueError("rope_deltas must contain one value per request")
+        deltas += (0,) * padding
         rope_positions = [
             positions[index * append_length + offset] + delta
             for index, delta in enumerate(deltas)
@@ -661,6 +690,7 @@ class PagedKVCache:
             _owner_token=self._batch_owner_token,
             commit_lengths=commit_lengths,
             rope_positions=buffer.rope_positions,
+            padding_rows=padding,
         )
 
     def _build_batch(
@@ -843,12 +873,13 @@ class PagedKVCache:
         requests = batch.request_ids
 
         if key.ndim == 4:
-            expected = (len(requests), self._keys.size(3), self._keys.size(4))
+            # batch_size 含补齐的假请求行（只写垃圾页）。
+            expected = (batch.batch_size, self._keys.size(3), self._keys.size(4))
             actual = (key.size(0), key.size(1), key.size(3))
             if actual != expected:
                 raise ValueError(
                     "dense key must have shape "
-                    f"[{len(requests)}, {self._keys.size(3)}, sequence, "
+                    f"[{batch.batch_size}, {self._keys.size(3)}, sequence, "
                     f"{self._keys.size(4)}]"
                 )
             if key.size(2) != batch.uniform_append_length:
