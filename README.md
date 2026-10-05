@@ -20,7 +20,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - greedy、temperature、top-k、top-p 与 per-request seed 采样；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
 
-本地 `../KuiperLLama/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐，并已加入 Attention TP + expert 分片的多进程路径；真实 Qwen3-30B-A3B 也已在四张 RTX 4090 上完成 token oracle、显存和三轮性能验收。
+本地 `../KuiperQwen3/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐，并已加入 Attention TP + expert 分片的多进程路径；真实 Qwen3-30B-A3B 也已在四张 RTX 4090 上完成 token oracle、显存和三轮性能验收。
 
 Qwen3.5/3.6 混合架构已与 Transformers 小模型（dense 与 MoE）logits 对齐；本地真实 `Qwen3.5-0.8B`（与 Qwen3.6 同一 DeltaNet/MTP 结构）的 BF16 greedy 输出与 Transformers 逐 token 一致，MTP k=1 接受率约 70%；fp32 reference 下 MTP 开/关输出逐位一致。`Qwen3.6-35B-A3B-FP8` 已通过只读 SafeTensors 头部的离线布局校验（TP=4 每 rank 全覆盖，约 10 GiB 权重），真实四卡运行尚待验收。设计细节见 [docs/design.md 第 8 节](docs/design.md)。
 
@@ -77,7 +77,7 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 import torch
 from mysglang import FlashAttentionBackend, HuggingFaceTokenizer, Qwen3ForCausalLM
 
-model_path = "../KuiperLLama/artifacts/qwen3-0.6b/hf-source"
+model_path = "../KuiperQwen3/artifacts/qwen3-0.6b/hf-source"
 tokenizer = HuggingFaceTokenizer.from_pretrained(model_path)
 model = Qwen3ForCausalLM.from_pretrained(
     model_path,
@@ -94,7 +94,7 @@ source ~/nano-vllm/.venv/bin/activate
 PYTHONPATH=src python -m mysglang.cli
 ```
 
-默认使用同级 `KuiperLLama/artifacts/qwen3-0.6b/hf-source`，输入 `/reset` 清空上下文，
+默认使用同级 `KuiperQwen3/artifacts/qwen3-0.6b/hf-source`，输入 `/reset` 清空上下文，
 输入 `/exit` 退出；其他 checkpoint 可用 `--model PATH` 指定。
 
 在一台四卡机器上启动 dense Qwen3 或 Qwen3MoE 的 TP=4 交互推理：
