@@ -35,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("benchmarks/results/raw.jsonl"))
     parser.add_argument("--name", default="generation")
     parser.add_argument(
-        "--backend", choices=("flash", "flashinfer", "torch", "auto"), default="flash"
+        "--backend", choices=("flashinfer", "torch", "auto"), default="flashinfer"
     )
     parser.add_argument("--page-size", type=int)
     parser.add_argument(
@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         "--kv-tokens",
         type=int,
         default=65536,
-        help="KV 池容量（token）；按页数给默认值会让小页后端的容量缩水 256/16 倍",
+        help="KV 池容量（token）；调整页大小时保持总容量不变",
     )
     parser.add_argument("--prefill-token-budget", type=int)
     parser.add_argument("--warmup-new-tokens", type=int, default=4)
@@ -353,8 +353,12 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
             "python": platform.python_version(),
             "torch": torch.__version__,
             "cuda_runtime": torch.version.cuda,
-            "flash_attn": _run_text(
-                [os.sys.executable, "-c", "import flash_attn; print(flash_attn.__version__)"]
+            "flashinfer": _run_text(
+                [
+                    os.sys.executable,
+                    "-c",
+                    "import importlib.metadata as m; print(m.version('flashinfer-python'))",
+                ]
             ),
             "nvidia_smi": _run_text(
                 ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
@@ -366,9 +370,9 @@ async def _driver(service: Any, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _resolve_kv_pool(args: argparse.Namespace) -> None:
-    """固定 KV 容量（token 数），页大小随 backend 变化时 A/B 才公平；结果里记下实际值。"""
+    """固定 KV 容量（token 数），调整页大小时 A/B 才公平；结果里记下实际值。"""
     if args.page_size is None:
-        args.page_size = 256 if args.backend == "flash" else 16
+        args.page_size = 16
     if args.num_pages is None:
         args.num_pages = max(1, args.kv_tokens // args.page_size)
 

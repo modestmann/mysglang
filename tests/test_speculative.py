@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 import torch
 
-from mysglang import FlashAttentionBackend, ModelConfig, Qwen3ForCausalLM
+from mysglang import FlashInferBackend, ModelConfig, Qwen3ForCausalLM
 from mysglang.scheduler import Scheduler, SchedulerConfig
 from mysglang.scheduler.ngram import NGramProposer
 from tests.helpers import drain_scheduler, make_model, make_request, reference_generate
 
-FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
+FLASHINFER_AVAILABLE = importlib.util.find_spec("flashinfer") is not None
 
 
 class NGramProposerTest(unittest.TestCase):
@@ -110,11 +110,11 @@ class SpeculativeSchedulerTest(unittest.TestCase):
             SchedulerConfig(speculative_ngram_max_tokens=-1)
 
     @unittest.skipUnless(
-        FLASH_ATTN_AVAILABLE and torch.cuda.is_available(),
-        "requires CUDA and flash-attn",
+        FLASHINFER_AVAILABLE and torch.cuda.is_available(),
+        "requires CUDA and flashinfer",
     )
     @torch.inference_mode()
-    def test_flash_paged_verification_matches_one_token_decode(self) -> None:
+    def test_flashinfer_paged_verification_matches_one_token_decode(self) -> None:
         torch.manual_seed(8642)
         model = (
             Qwen3ForCausalLM(
@@ -125,14 +125,15 @@ class SpeculativeSchedulerTest(unittest.TestCase):
                     num_layers=2,
                     num_attention_heads=4,
                     num_key_value_heads=2,
+                    head_dim=64,
                     max_position_embeddings=512,
                 ),
-                attention_backend=FlashAttentionBackend(),
+                attention_backend=FlashInferBackend(),
             )
             .cuda()
             .half()
         )
-        base = dict(num_pages=2, page_size=256)
+        base = dict(num_pages=32, page_size=16)
         eager = Scheduler(model, SchedulerConfig(**base))
         speculative = Scheduler(
             model,
@@ -141,7 +142,7 @@ class SpeculativeSchedulerTest(unittest.TestCase):
         prompt = list(range(1, 17))
         eager.add(make_request("eager", prompt, 5))
         expected = drain_scheduler(eager)["eager"]
-        speculative.add(make_request("speculative-fa", prompt, 5))
+        speculative.add(make_request("speculative-fi", prompt, 5))
         first = speculative.step()
 
         with patch.object(

@@ -29,10 +29,10 @@
 ## 2. GPU AttentionBackend（ragged Prefill 已完成）
 
 - 已把 PyTorch gather/pad 路径收敛为 `TorchAttentionBackend` correctness oracle；
-- 已接入 `FlashAttentionBackend`，Prefill/Decode 直接消费物理 KV pool、block tables 和 sequence lengths；
-- 已在 RTX 4060 Laptop（SM89）验证 uncached、paged Prefill 和变长 batch Decode 与 reference 对齐；
+- 已接入 `FlashInferBackend`，Prefill/Decode 通过 CSR 页表直接消费物理 KV pool，支持 1/16-token 小页；
+- Torch 提供 uncached oracle；FlashInfer 测试覆盖 paged Prefill、变长 batch Decode 与 reference 对齐；
 - 已用 `PagedKVBatch` 把 block table、旧长度和追加范围提升为一次 forward 构造、所有层复用的 metadata；
-- 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FA2 paged-varlen kernel 直接读取历史页；
+- 已实现 flattened multi-request Prefill：slot mapping 写入新 K/V，FlashInfer paged prefill kernel 直接读取历史页；
 - 已实现 Prefill/Decode 混合 forward：已有 Decode 每轮推进一个 token，Prefill 在独立 token budget 内打包；
 - 已按采样位置裁剪最终 hidden states，只为 Decode 和已完成 Prompt 的末尾 token 计算 logits；未完成 Prefill 仅更新 KV；
 - 已为纯 Decode 按精确 batch size 复用固定地址的 input/metadata buffer，并可选捕获 CUDA Graph；
@@ -46,7 +46,7 @@
 
 - 已接入本地 Hugging Face tokenizer、checkpoint chat template 和增量 detokenization；
 - 已实现单文件/分片 SafeTensors 逐 tensor 加载，以及分离 Q/K/V、gate/up 到 fused 权重的映射；
-- 已用本地 Qwen3-0.6B 对齐最终 FP32 logits，并跑通 BF16 + FA2 paged-KV 单请求和并发生成；
+- 历史版本已用本地 Qwen3-0.6B 对齐最终 FP32 logits，并跑通 BF16 + FA2 paged-KV 单请求和并发生成；该历史结果不代表当前 FlashInfer 后端的真实模型验收；
 - 已实现 Qwen3MoE router、softmax/top-k、可选概率归一化和 expert dispatch，并与 Transformers 小 MoE logits 对齐；
 - 已增加 temperature、top-k、top-p 和独立 per-request seed；随机结果不受 continuous batch 组合影响；
 - 已实现 replicated-token expert 分片：每个 rank 只加载/计算自己的 experts，输出以

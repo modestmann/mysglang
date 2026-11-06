@@ -22,22 +22,22 @@ PYTHONPATH=src python -m pytest tests/test_engine.py -k prefix
 ruff check src tests benchmarks
 
 # 交互 CLI（默认模型 ../KuiperLLama/artifacts/qwen3-0.6b/hf-source，/reset、/exit）
-PYTHONPATH=src python -m mysglang.cli [--model PATH] [--backend flash] [--cuda-graph] \
+PYTHONPATH=src python -m mysglang.cli [--model PATH] [--backend flashinfer] [--cuda-graph] \
   [--moe-dispatch naive|sorted|grouped|triton_grouped|all_to_all] \
   [--speculative-ngram-max-tokens 4]
 
 # 多卡 TP
 PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
-  --tensor-parallel-size 4 --model /path/to/ckpt --device cuda --dtype bfloat16 --backend flash
+  --tensor-parallel-size 4 --model /path/to/ckpt --device cuda --dtype bfloat16 --backend flashinfer
 
 # Qwen3.5/3.6：本地验收模型 ~/models/Qwen3.5-0.8B（BF16）与 ~/models/Qwen3.5-0.8B-FP8（自转换）
-PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B --backend flash \
+PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B --backend flashinfer \
   --cuda-graph --speculative-mtp-steps 2 [--thinking] [--dequantize-fp8]
 # OpenAI 兼容服务（TP 时只有 rank 0 监听）
 PYTHONPATH=src python -m mysglang.server --model ~/models/Qwen3.5-0.8B --port 8000
 ```
 
-部分测试按依赖条件跳过：flash-attn/CUDA、`httpx`（serving extra）、`transformers`（model extra）、本地 Qwen3 tokenizer 目录。TP 测试通过 CPU/Gloo 多进程运行，不需要 GPU。venv 里装了 fla（flash-linear-attention）后，Transformers 的 Qwen3.5 在 import 时就会绑定 fla kernel，CPU oracle 测试必须像 `tests/test_hybrid.py` 的 `_TorchFallbackKernels` 那样换回 `__wrapped__` 的 PyTorch 实现。
+部分测试按依赖条件跳过：flashinfer/CUDA、`httpx`（serving extra）、`transformers`（model extra）、本地 Qwen3 tokenizer 目录。TP 测试通过 CPU/Gloo 多进程运行，不需要 GPU。venv 里装了 fla（flash-linear-attention）后，Transformers 的 Qwen3.5 在 import 时就会绑定 fla kernel，CPU oracle 测试必须像 `tests/test_hybrid.py` 的 `_TorchFallbackKernels` 那样换回 `__wrapped__` 的 PyTorch 实现。
 
 Benchmark 与 Transformers 对齐脚本在 `benchmarks/`，用法见 [benchmarks/README.md](benchmarks/README.md)；结果按 `benchmarks/results/<日期>-<硬件>/` 归档（JSONL 原始数据 + `report.md`）。
 
@@ -55,7 +55,7 @@ Benchmark 与 Transformers 对齐脚本在 `benchmarks/`，用法见 [benchmarks
 - radix 匹配后先 lock 再引用页面；只淘汰 `ref_count == 0` 的叶节点；
 - radix 匹配故意保留 prompt 最后一个 token 不命中（需要它产生首个 logits，且避免部分页 copy-on-write）。
 
-**Attention backend 窄接口**：模型只产生 RoPE 后的 Q/K/V；`PagedKVCache.prepare_batch()` 每次 forward 构造一次所有层共享的 metadata（block table、cu_seqlens、slot_mapping）。backend 在 attention 成功后才 `commit_append()`；CUDA Graph 路径则在输出同步后统一 `commit_batch()`，保证 kernel 失败时逻辑长度不前移。`TorchAttentionBackend` 是 CPU 测试与 correctness oracle；`FlashAttentionBackend` 要求 CUDA fp16/bf16 且 `page_size` 为 256 的倍数。
+**Attention backend 窄接口**：模型只产生 RoPE 后的 Q/K/V；`PagedKVCache.prepare_batch()` 每次 forward 构造一次所有层共享的 metadata（block table、cu_seqlens、slot_mapping）。backend 在 attention 成功后才 `commit_append()`；CUDA Graph 路径则在输出同步后统一 `commit_batch()`，保证 kernel 失败时逻辑长度不前移。`TorchAttentionBackend` 是 CPU 测试与 correctness oracle；`FlashInferBackend` 使用 CUDA fp16/bf16 和 CSR 页表，默认 `page_size=16`，也支持 1-token 页；`flashinfer` extra 提供 GPU 依赖。
 
 **模型**：`Qwen3ForCausalLM`（[modeling/qwen3.py](src/mysglang/modeling/qwen3.py)）同时承载 dense 与 MoE，使用 fused QKV 与 fused gate/up；`head_dim` 显式配置，不能假设等于 `hidden_size / num_heads`。TP 分片时 fused 参数的每个逻辑段需独立切分（[modeling/parallel.py](src/mysglang/modeling/parallel.py)、[modeling/loader.py](src/mysglang/modeling/loader.py)）。MoE dispatch 有五条可对照路径，只有 `triton_grouped` 可进入 CUDA Graph。
 

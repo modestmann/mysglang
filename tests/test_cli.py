@@ -1,15 +1,96 @@
 from __future__ import annotations
 
+import io
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 import torch
 
-from mysglang.cli import _LoadedRuntime, _parser, _rank_device, _read_distributed_launch, _run
+from benchmarks.benchmark_generation import _parser as benchmark_parser
+from benchmarks.benchmark_generation import _resolve_kv_pool
+from mysglang.cli import (
+    _LoadedRuntime,
+    _make_backend,
+    _parser,
+    _rank_device,
+    _read_distributed_launch,
+    _run,
+    _scheduler_config,
+)
+from mysglang.modeling import TorchAttentionBackend
 from mysglang.scheduler import SchedulerConfig
+from mysglang.server import _server_parser
 from mysglang.serving import GenerationService
 from mysglang.tokenizer import ByteTokenizer
 from tests.helpers import make_model
+
+
+class CliBackendTest(unittest.TestCase):
+    def test_auto_selects_flashinfer_only_when_available_on_cuda(self) -> None:
+        for device, available in (("cpu", False), ("cpu", True), ("cuda", False), ("cuda", True)):
+            with self.subTest(device=device, available=available):
+                with (
+                    patch(
+                        "mysglang.cli.importlib.util.find_spec",
+                        return_value=object() if available else None,
+                    ) as find,
+                    patch("mysglang.cli.FlashInferBackend") as flashinfer,
+                ):
+                    backend = _make_backend("auto", torch.device(device))
+                    if device == "cuda" and available:
+                        self.assertIs(backend, flashinfer.return_value)
+                        flashinfer.assert_called_once_with()
+                    else:
+                        self.assertIsInstance(backend, TorchAttentionBackend)
+                        flashinfer.assert_not_called()
+                    if device == "cuda":
+                        find.assert_called_once_with("flashinfer")
+                    else:
+                        find.assert_not_called()
+
+    def test_explicit_backend_selection_does_not_silently_fall_back(self) -> None:
+        with patch(
+            "mysglang.cli.FlashInferBackend", side_effect=RuntimeError("missing flashinfer")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing flashinfer"):
+                _make_backend("flashinfer", torch.device("cuda"))
+            self.assertIsInstance(
+                _make_backend("torch", torch.device("cuda")), TorchAttentionBackend
+            )
+        with self.assertRaisesRegex(ValueError, "unknown attention backend"):
+            _make_backend("flash", torch.device("cuda"))
+
+    def test_entry_points_accept_flashinfer_and_reject_removed_backend(self) -> None:
+        for factory, required in (
+            (_parser, []),
+            (_server_parser, []),
+            (benchmark_parser, ["--model", "."]),
+        ):
+            with self.subTest(entry_point=factory.__module__):
+                parser = factory()
+                args = parser.parse_args([*required, "--backend", "flashinfer", "--page-size", "1"])
+                self.assertEqual((args.backend, args.page_size), ("flashinfer", 1))
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    parser.parse_args([*required, "--backend", "flash"])
+                self.assertEqual(error.exception.code, 2)
+
+    def test_scheduler_defaults_to_small_pages_and_honors_overrides(self) -> None:
+        for flags, expected in (([], 16), (["--page-size", "1"], 1), (["--page-size", "32"], 32)):
+            with self.subTest(flags=flags):
+                args = _parser().parse_args(flags)
+                self.assertEqual(_scheduler_config(args).page_size, expected)
+        with self.assertRaises(ValueError):
+            _scheduler_config(_parser().parse_args(["--page-size", "0"]))
+
+    def test_benchmark_page_size_preserves_kv_token_budget(self) -> None:
+        for flags, page_size in (([], 16), (["--page-size", "1"], 1)):
+            with self.subTest(flags=flags):
+                args = benchmark_parser().parse_args(["--model", ".", *flags])
+                _resolve_kv_pool(args)
+                self.assertEqual(args.backend, "flashinfer")
+                self.assertEqual(args.page_size, page_size)
+                self.assertEqual(args.num_pages * args.page_size, args.kv_tokens)
 
 
 class CliTensorParallelLaunchTest(unittest.TestCase):

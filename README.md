@@ -6,7 +6,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - continuous batching、ragged/chunked prefill、Prefill/Decode 混合 batch；
 - 共享 Paged KV Cache、容量预留和 OOM-safe admission；
 - page-aligned Radix prefix cache、引用保护与按需淘汰；
-- 可切换的 PyTorch reference / FlashAttention 2 attention backend；
+- 可切换的 PyTorch reference / FlashInfer attention backend；
 - 一次 forward 构造、所有 Transformer 层复用的 Paged KV batch metadata；
 - 固定地址 Decode metadata buffer 与可选的精确 batch-size CUDA Graph；
 - 无草稿模型的 n-gram 投机解码、packed 主模型验证与 KV 逻辑回滚；
@@ -20,7 +20,7 @@ MySGLang 是一个用于理解和验证 LLM 推理系统的精简实现。当前
 - greedy、temperature、top-k、top-p 与 per-request seed 采样；
 - HTTP/JSON、SSE 流式输出和 abort 清理。
 
-本地 `../KuiperQwen3/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐，并已加入 Attention TP + expert 分片的多进程路径；真实 Qwen3-30B-A3B 也已在四张 RTX 4090 上完成 token oracle、显存和三轮性能验收。
+历史版本中，本地 `../KuiperQwen3/artifacts/qwen3-0.6b/hf-source` 的真实 Qwen3-0.6B 已完成 FP32 logits 对齐，以及 BF16 + FlashAttention paged-KV 的单请求/并发 smoke test。Qwen3MoE 已完成 Transformers 小模型 oracle 对齐，并已加入 Attention TP + expert 分片的多进程路径；真实 Qwen3-30B-A3B 也已在四张 RTX 4090 上完成 token oracle、显存和三轮性能验收。
 
 Qwen3.5/3.6 混合架构已与 Transformers 小模型（dense 与 MoE）logits 对齐；本地真实 `Qwen3.5-0.8B`（与 Qwen3.6 同一 DeltaNet/MTP 结构）的 BF16 greedy 输出与 Transformers 逐 token 一致，MTP k=1 接受率约 70%；fp32 reference 下 MTP 开/关输出逐位一致。`Qwen3.6-35B-A3B-FP8` 已通过只读 SafeTensors 头部的离线布局校验（TP=4 每 rank 全覆盖，约 10 GiB 权重），真实四卡运行尚待验收。设计细节见 [docs/design.md 第 8 节](docs/design.md)。
 
@@ -69,13 +69,24 @@ source ~/nano-vllm/.venv/bin/activate
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-项目的依赖边界以 `pyproject.toml` 为准：基础实现只要求 PyTorch；`serve`、`model`、`flash-attn` 和 `dev` extras 分别对应 HTTP、真实模型、GPU backend 和开发工具。具体 Python、PyTorch、CUDA、GPU 与 commit 信息应由未来评测脚本写入结果，而不在文档中维护容易过期的环境快照。
+项目的依赖边界以 `pyproject.toml` 为准：基础实现只要求 PyTorch；`serve`、`model`、`vision`、`flashinfer` 和 `dev` extras 分别对应 HTTP、真实模型、图片预处理、GPU backend 和开发工具。具体 Python、PyTorch、CUDA、GPU 与 commit 信息应由未来评测脚本写入结果，而不在文档中维护容易过期的环境快照。
+
+GPU attention 安装 `flashinfer` extra（含 FlashInfer 与 Triton）：
+
+```bash
+uv pip install -e '.[model,serve,flashinfer]'
+```
+
+`--backend auto` 在 CUDA 且已安装 FlashInfer 时选用它，否则使用 Torch；显式指定
+`--backend flashinfer` 时缺包会报错。CLI、HTTP server 和 benchmark 都支持
+`--page-size 1` 或 `16`，默认值为 `16`。完整前缀重算 oracle 使用 `TorchAttentionBackend`，
+FlashInfer 推理通过 Scheduler 或带 KV cache 的模型接口运行。
 
 加载本地真实模型：
 
 ```python
 import torch
-from mysglang import FlashAttentionBackend, HuggingFaceTokenizer, Qwen3ForCausalLM
+from mysglang import FlashInferBackend, HuggingFaceTokenizer, Qwen3ForCausalLM
 
 model_path = "../KuiperQwen3/artifacts/qwen3-0.6b/hf-source"
 tokenizer = HuggingFaceTokenizer.from_pretrained(model_path)
@@ -83,7 +94,7 @@ model = Qwen3ForCausalLM.from_pretrained(
     model_path,
     dtype=torch.bfloat16,
     device="cuda",
-    attention_backend=FlashAttentionBackend(),
+    attention_backend=FlashInferBackend(),
 )
 ```
 
@@ -103,7 +114,7 @@ PYTHONPATH=src python -m mysglang.cli
 PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.cli \
   --tensor-parallel-size 4 \
   --model /path/to/qwen3-checkpoint \
-  --device cuda --dtype bfloat16 --backend flash
+  --device cuda --dtype bfloat16 --backend flashinfer
 ```
 
 `torchrun` 创建四个进程并设置 `RANK`、`LOCAL_RANK` 和 `WORLD_SIZE`；每个进程绑定
@@ -119,7 +130,7 @@ fla kernel（`pip install flash-linear-attention`，未安装时回退到 PyTorc
 
 ```bash
 PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B \
-  --backend flash --cuda-graph --speculative-mtp-steps 2 --thinking
+  --backend flashinfer --cuda-graph --speculative-mtp-steps 2 --thinking
 ```
 
 `--speculative-mtp-steps k` 会同时加载 checkpoint 的 MTP 层，每轮递归起草 k 个 token；
@@ -137,7 +148,7 @@ OpenAI 兼容服务（thinking 输出拆到 `reasoning_content`，`tools` 解析
 
 ```bash
 PYTHONPATH=src python -m mysglang.server --model ~/models/Qwen3.5-0.8B \
-  --backend flash --cuda-graph --cuda-graph-batch-sizes 1 2 3 4 \
+  --backend flashinfer --cuda-graph --cuda-graph-batch-sizes 1 2 3 4 \
   --speculative-mtp-steps 2 --max-running-requests 4 --port 8000
 
 curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -149,7 +160,7 @@ curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '
 交互模式里 `/image PATH` 给下一句附图；HTTP 用 OpenAI 的 `image_url` content part：
 
 ```bash
-PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B --backend flash \
+PYTHONPATH=src python -m mysglang.cli --model ~/models/Qwen3.5-0.8B --backend flashinfer \
   --image ./cat.png --prompt "这张图里有什么？"
 
 curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -159,7 +170,7 @@ curl localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '
   "max_tokens": 128, "chat_template_kwargs": {"enable_thinking": false}}'
 ```
 
-图片预处理依赖 `pillow`（不需要 torchvision）；图片请求要求关闭前缀缓存（Qwen3.5 混合模型本来就关闭）。
+图片预处理通过 `vision` extra 安装 NumPy 和 Pillow：`uv pip install -e '.[vision]'`（不需要 torchvision）。这些依赖只在处理图片时导入，基础文本推理无需安装；图片请求要求关闭前缀缓存（Qwen3.5 混合模型本来就关闭）。
 
 在四张 RTX 4090 上运行 `Qwen3.6-35B-A3B-FP8`（每 rank 约 10 GiB 权重；2 个 KV 头按
 GQA 分组复制到 4 个 rank；MoE 的 CUDA Graph 需要 `triton_grouped`）。上机前可以先离线
@@ -171,9 +182,9 @@ PYTHONPATH=src python benchmarks/validate_checkpoint_layout.py \
 
 PYTHONPATH=src torchrun --standalone --nproc-per-node=4 -m mysglang.server \
   --tensor-parallel-size 4 --model /path/to/Qwen3.6-35B-A3B-FP8 \
-  --device cuda --dtype bfloat16 --backend flash --moe-dispatch triton_grouped \
+  --device cuda --dtype bfloat16 --backend flashinfer --moe-dispatch triton_grouped \
   --cuda-graph --cuda-graph-batch-sizes 1 2 4 8 --speculative-mtp-steps 3 \
-  --max-running-requests 8 --num-pages 256 --port 8000
+  --max-running-requests 8 --num-pages 4096 --port 8000
 ```
 
 `--dequantize-fp8` 会把 FP8 checkpoint 反量化成 `--dtype` 权重加载，作为 FP8 kernel 的数值对照。
@@ -205,7 +216,7 @@ assignments，并将 gate/up GEMM 与 SwiGLU 融合，不再填充到最忙 expe
 - MoE 已有 portable padded-batched grouped GEMM、no-padding Triton grouped GEMM 和
   token all-to-all reference 路径；旧两条路径的四卡实测均慢于 sorted，新的 Triton
   路径仍需在目标 CUDA 环境做 token oracle 和 A/B，当前不作为默认值；
-- 默认 PyTorch backend 会 gather/pad；可选 FA2 backend 已能直接消费 page pool/block table，但要求 CUDA 半精度且 `page_size` 为 256 的倍数；
+- PyTorch reference backend 会 gather/pad；FlashInfer 使用 CUDA 半精度和 CSR 页表直接读取 paged KV，默认每页 16 个 token，也支持 `--page-size 1`；
 - 纯 Decode 可复用 metadata buffer 并按精确 batch size 使用 dense/MoE、单卡/TP CUDA
   Graph；TP/NCCL capture 尚待云端验证，ragged/mixed metadata 仍由 Python 构造；
 - 已完成 dense 模型级 TP、MoE expert 分片、checkpoint 分片加载、rank worker/batch-plan

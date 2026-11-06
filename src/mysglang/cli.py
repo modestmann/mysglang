@@ -47,7 +47,6 @@ import torch.distributed as dist
 
 from mysglang.config import ModelConfig
 from mysglang.modeling import (
-    FlashAttentionBackend,
     FlashInferBackend,
     Qwen3ForCausalLM,
     TensorParallelContext,
@@ -71,12 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default=None)
     parser.add_argument(
-        "--backend", choices=("auto", "flash", "flashinfer", "torch"), default="auto"
+        "--backend", choices=("auto", "flashinfer", "torch"), default="auto"
     )
     parser.add_argument(
         "--page-size",
         type=int,
-        help="tokens per KV page (default: 256 for flash, which FA2 requires; 16 otherwise)",
+        help="tokens per KV page (default: 16)",
     )
     parser.add_argument(
         "--moe-dispatch",
@@ -194,14 +193,14 @@ def _resolve_dtype(name: str | None, device: torch.device) -> torch.dtype:
 
 
 def _make_backend(name: str, device: torch.device):
-    use_flash = name == "flash" or (
+    if name not in {"auto", "flashinfer", "torch"}:
+        raise ValueError(f"unknown attention backend: {name}")
+    use_flashinfer = name == "flashinfer" or (
         name == "auto"
         and device.type == "cuda"
-        and importlib.util.find_spec("flash_attn") is not None
+        and importlib.util.find_spec("flashinfer") is not None
     )
-    if name == "flashinfer":
-        return FlashInferBackend()
-    return FlashAttentionBackend() if use_flash else TorchAttentionBackend()
+    return FlashInferBackend() if use_flashinfer else TorchAttentionBackend()
 
 
 @dataclass(frozen=True)
@@ -329,12 +328,11 @@ def _auto_num_pages(
 
 def _scheduler_config(
     args: argparse.Namespace,
-    backend,
     model: Qwen3ForCausalLM | None = None,
 ) -> SchedulerConfig:
-    page_size = getattr(args, "page_size", None) or (
-        256 if isinstance(backend, FlashAttentionBackend) else 16
-    )
+    page_size = getattr(args, "page_size", None)
+    if page_size is None:
+        page_size = 16
     num_pages = args.num_pages
     default_prefill_budget = None
     if num_pages is None:
@@ -411,11 +409,11 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
     device = _rank_device(args.device, launch)
     dtype = _resolve_dtype(args.dtype, device)
     backend = _make_backend(args.backend, device)
-    if isinstance(backend, (FlashAttentionBackend, FlashInferBackend)) and dtype not in {
+    if isinstance(backend, FlashInferBackend) and dtype not in {
         torch.float16,
         torch.bfloat16,
     }:
-        raise ValueError("flash / flashinfer backends require --dtype float16 or bfloat16")
+        raise ValueError("flashinfer backend requires --dtype float16 or bfloat16")
     owns_process_group = False
     tensor_parallel = TensorParallelContext()
     control_group: dist.ProcessGroup | None = None
@@ -460,7 +458,7 @@ def _load_runtime(args: argparse.Namespace) -> _LoadedRuntime:
         fp8_weights=not args.dequantize_fp8,
         enable_vision=_vision_enabled(args, model_path),
     )
-    scheduler_config = _scheduler_config(args, backend, model)
+    scheduler_config = _scheduler_config(args, model)
     if tensor_parallel.enabled:
         scheduler = TensorParallelScheduler(
             model,

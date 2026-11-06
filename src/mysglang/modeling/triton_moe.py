@@ -7,7 +7,7 @@ try:
     import triton.language as tl
 except ImportError as error:  # pragma: no cover - exercised only without the optional extra
     raise ImportError(
-        "the triton_grouped MoE backend requires the 'flash-attn' project extra"
+        "the triton_grouped MoE backend requires the 'flashinfer' project extra (triton)"
     ) from error
 
 

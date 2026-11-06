@@ -1,9 +1,12 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
+from mysglang.core import FinishReason
 from mysglang.scheduler import SchedulerConfig
 from mysglang.serving import GenerationService, GenerationSession
+from mysglang.serving.service import GenerationChunk
 from mysglang.tokenizer import ByteTokenizer
 
 try:
@@ -99,6 +102,104 @@ class HTTPServingTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
+
+    async def _scripted_chat(self, pieces, *, stream, finish_reason=FinishReason.LENGTH):
+        async def generate(session):
+            for index, piece in enumerate(pieces):
+                finished = index == len(pieces) - 1
+                yield GenerationChunk(
+                    request_id=session.request.request_id,
+                    text=piece,
+                    token_id=index,
+                    output_index=index,
+                    finished=finished,
+                    finish_reason=finish_reason if finished else None,
+                    prompt_tokens=session.prompt_tokens,
+                    completion_tokens=index + 1,
+                )
+
+        with patch.object(self.service, "_run_session", side_effect=generate):
+            response = await self.client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "weather?"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"city": {"type": "string"}},
+                                },
+                            },
+                        }
+                    ],
+                    "stream": stream,
+                    "max_tokens": 4,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        if not stream:
+            return response.json()["choices"][0]
+        self.assertEqual(response.text.count("data: [DONE]"), 1)
+        return [
+            json.loads(line[6:])["choices"][0]
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+
+    async def test_truncated_tool_calls_preserve_text_in_json_and_sse(self) -> None:
+        for text in (
+            "<tool_call>",
+            "prefix <tool_call>\n<function=get_weather>\n<parameter=city>\nBei",
+            "prefix <tool_call>not a function</tool_call>",
+            "prefix <tool_ca",
+        ):
+            for chunk_size in (1, 7, len(text)):
+                for empty_final in (False, True):
+                    with self.subTest(text=text, chunk_size=chunk_size, empty_final=empty_final):
+                        pieces = [
+                            text[start : start + chunk_size]
+                            for start in range(0, len(text), chunk_size)
+                        ]
+                        if empty_final:
+                            pieces.append("")
+                        result = await self._scripted_chat(pieces, stream=False)
+                        self.assertEqual(result["message"]["content"], text)
+                        self.assertNotIn("tool_calls", result["message"])
+                        self.assertEqual(result["finish_reason"], "length")
+                        events = await self._scripted_chat(pieces, stream=True)
+                        self.assertEqual(
+                            "".join(e["delta"].get("content", "") for e in events), text
+                        )
+                        self.assertTrue(all("tool_calls" not in e["delta"] for e in events))
+                        self.assertEqual(events[-1]["finish_reason"], "length")
+
+    async def test_complete_tool_call_is_structured_in_json_and_sse(self) -> None:
+        text = (
+            "prefix <tool_call>\n<function=get_weather>\n"
+            "<parameter=city>\nBeijing\n</parameter>\n</function>\n</tool_call>"
+        )
+        pieces = [*text, ""]
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                result = await self._scripted_chat(
+                    pieces, stream=stream, finish_reason=FinishReason.EOS
+                )
+                if stream:
+                    content = "".join(e["delta"].get("content", "") for e in result)
+                    calls = [call for e in result for call in e["delta"].get("tool_calls", [])]
+                    finish_reason = result[-1]["finish_reason"]
+                else:
+                    content = result["message"]["content"]
+                    calls = result["message"]["tool_calls"]
+                    finish_reason = result["finish_reason"]
+                self.assertEqual(content, "prefix ")
+                self.assertEqual(finish_reason, "tool_calls")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["function"]["name"], "get_weather")
+                self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"city": "Beijing"})
 
     async def test_streaming_matches_non_streaming_and_reuses_prefix(self) -> None:
         payload = {

@@ -6,7 +6,7 @@ try:
     import triton
     import triton.language as tl
 except ImportError as error:  # pragma: no cover - exercised only without the optional extra
-    raise ImportError("FP8 CUDA kernels require the 'flash-attn' project extra") from error
+    raise ImportError("FP8 CUDA kernels require the 'flashinfer' project extra (triton)") from error
 
 
 # W8A16：权重保持 1 字节 e4m3，在 kernel 内转成激活精度参与 tl.dot。每个 K tile 落在同一个

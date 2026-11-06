@@ -115,6 +115,99 @@ def multimodal_reference(model, prompt, multimodal, max_new_tokens):
     return output
 
 
+class CachedMultimodalForwardTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_dense_cached_prefill_and_decode_match_full_recomputation(self) -> None:
+        model = make_vl()
+        for batch_size in (1, 2):
+            grids = ((1, 4, 4), (1, 2, 8))[:batch_size]
+            prompts = [
+                [row + 1, START, IMAGE, IMAGE, IMAGE, IMAGE, END, 7, 8] for row in range(batch_size)
+            ]
+            input_ids = torch.tensor(prompts)
+            features = model.encode_images(torch.randn(batch_size * 16, VISION.patch_dim), grids)
+            position_info = [
+                mrope_positions(prompt, (grid,), IMAGE, 2) for prompt, grid in zip(prompts, grids)
+            ]
+            positions = torch.stack([info[0] for info in position_info], dim=1)
+            rope_deltas = torch.tensor([info[1] for info in position_info])
+
+            def overrides(start, end):
+                # 下标相对本次 dense batch 展平后的 token；分块可从图片中间截断。
+                image_columns = [column for column in range(2, 6) if start <= column < end]
+                rows = [
+                    row * (end - start) + column - start
+                    for row in range(batch_size)
+                    for column in image_columns
+                ]
+                feature_rows = [
+                    row * 4 + column - 2 for row in range(batch_size) for column in image_columns
+                ]
+                return torch.tensor(rows, dtype=torch.long), features[feature_rows]
+
+            expected = model(
+                input_ids, mrope_positions=positions, embedding_overrides=overrides(0, 9)
+            )
+            for chunk_size in (9, 3):
+                with self.subTest(batch_size=batch_size, chunk_size=chunk_size):
+                    scheduler = Scheduler(
+                        model, SchedulerConfig(max_running_requests=2, num_pages=32, page_size=4)
+                    )
+                    cache = scheduler.cache
+                    request_ids = tuple(f"image-{row}" for row in range(batch_size))
+                    for request_id, prompt in zip(request_ids, prompts):
+                        self.assertEqual(
+                            cache.reserve_request_with_prefix(request_id, 11, prompt), 0
+                        )
+                    try:
+                        pieces = []
+                        for start in range(0, 9, chunk_size):
+                            end = min(start + chunk_size, 9)
+                            for request_id in request_ids:
+                                cache.ensure_capacity(request_id, end)
+                            pieces.append(
+                                model(
+                                    input_ids[:, start:end],
+                                    kv_cache=cache,
+                                    cache_request_ids=request_ids,
+                                    mrope_positions=positions[:, :, start:end],
+                                    embedding_overrides=overrides(start, end),
+                                )
+                            )
+                        torch.testing.assert_close(
+                            torch.cat(pieces, dim=1), expected, atol=1e-5, rtol=1e-5
+                        )
+                        tokens, all_positions, last = input_ids, positions, expected[:, -1:]
+                        for step in range(2):
+                            next_token = last.argmax(dim=-1)
+                            tokens = torch.cat((tokens, next_token), dim=1)
+                            decode_positions = (9 + step + rope_deltas)[None, :, None].expand(
+                                3, -1, -1
+                            )
+                            all_positions = torch.cat((all_positions, decode_positions), dim=2)
+                            last = model(
+                                tokens,
+                                mrope_positions=all_positions,
+                                embedding_overrides=overrides(0, tokens.size(1)),
+                            )[:, -1:]
+                            for request_id in request_ids:
+                                cache.ensure_capacity(request_id, tokens.size(1))
+                            actual = model(
+                                next_token,
+                                kv_cache=cache,
+                                cache_request_ids=request_ids,
+                                mrope_positions=decode_positions,
+                            )
+                            torch.testing.assert_close(actual, last, atol=1e-5, rtol=1e-5)
+                        self.assertEqual(cache.lengths(request_ids), (11,) * batch_size)
+                    finally:
+                        for request_id in request_ids:
+                            cache.release_request(request_id)
+                        cache.check_integrity()
+                        scheduler.close()
+
+
+
 @unittest.skipUnless(Image is not None, "requires pillow")
 class PreprocessingTest(unittest.TestCase):
     @unittest.skipUnless(Qwen3_5ForConditionalGeneration is not None, "requires transformers")
@@ -489,19 +582,19 @@ class ContentPartTest(unittest.TestCase):
 @unittest.skipUnless(
     Image is not None
     and torch.cuda.is_available()
-    and importlib.util.find_spec("flash_attn") is not None,
-    "requires pillow, CUDA and flash-attn",
+    and importlib.util.find_spec("flashinfer") is not None,
+    "requires pillow, CUDA and flashinfer",
 )
 class MultimodalCudaGraphTest(unittest.TestCase):
     @torch.inference_mode()
     def test_graph_decode_uses_each_requests_rope_delta(self) -> None:
-        from mysglang import FlashAttentionBackend
+        from mysglang import FlashInferBackend
 
         torch.manual_seed(12)
-        config = replace(vl_config(mtp=True), vocab_size=64, head_dim=32)
+        config = replace(vl_config(mtp=True), head_dim=64, partial_rotary_factor=0.25)
         model = Qwen3ForCausalLM(
             config,
-            attention_backend=FlashAttentionBackend(),
+            attention_backend=FlashInferBackend(),
             enable_mtp=True,
             enable_vision=True,
         )
@@ -514,8 +607,8 @@ class MultimodalCudaGraphTest(unittest.TestCase):
                 SchedulerConfig(
                     max_running_requests=2,
                     prefill_token_budget=16,
-                    num_pages=4,
-                    page_size=256,
+                    num_pages=64,
+                    page_size=16,
                     speculative_mtp_steps=2,
                     decode_cuda_graph_batch_sizes=(1, 2) if graph else (),
                 ),

@@ -4,6 +4,10 @@
 `torchrun` TP。它将配置、逐请求 token/timestamp、Scheduler 计数、Torch 峰值显存、
 `nvidia-smi` 采样、软件版本、GPU 拓扑和完整命令写入 JSONL。
 
+默认 GPU 后端是 FlashInfer（`uv pip install -e '.[model,flashinfer]'`），默认页大小为 16；
+`--page-size 1` 可进一步减小分页粒度。`--kv-tokens` 固定总 KV 容量，`--num-pages` 可显式覆盖页数。
+历史报告保留运行时的后端和环境信息，复测时以当前参数及新生成的 JSONL 为准。
+
 单卡示例：
 
 ```bash
@@ -80,8 +84,8 @@ JSONL 的 scheduler 部分会记录 `speculative_draft_tokens`、
 output tokens/s、ITL、`model_forwards` 及接受率。高重复 synthetic prompt 只表示机制上界，
 正式结论还应包含真实对话和代码 workload。
 
-若 FA2 并发路径不能逐 token 对齐，先用 Torch attention 重跑相同 A/B。Torch
-精确对齐而 FA2 分叉时，还要比较单请求与并发请求的首个不同 token：普通
+若 FlashInfer 并发路径不能逐 token 对齐，先用 Torch attention 重跑相同 A/B。Torch
+精确对齐而 FlashInfer 分叉时，还要比较单请求与并发请求的首个不同 token：普通
 Decode 与 packed verification 可能调用不同 BF16 kernel，临界 logits 的归约
 舍入可以改变 greedy `argmax`。这类结果必须在报告中标注为数值分叉，
 不能既当作 KV/调度错误，也不能声称 bitwise 对齐通过。
@@ -95,7 +99,7 @@ JSONL 的 `speculative_draft_forwards` 统计 MTP 头自己的前向（递归草
 ```bash
 PYTHONPATH=src python benchmarks/benchmark_generation.py \
   --model ~/models/Qwen3.5-0.8B --name c4-mtp2-graph \
-  --concurrency 4 --prompt-tokens 128 --max-new-tokens 256 --num-pages 8 \
+  --concurrency 4 --prompt-tokens 128 --max-new-tokens 256 --num-pages 128 \
   --cuda-graph --speculative-mtp-steps 2
 ```
 

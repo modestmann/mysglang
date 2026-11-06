@@ -1,6 +1,5 @@
 from .attention import (
     AttentionBackend,
-    FlashAttentionBackend,
     FlashInferBackend,
     TorchAttentionBackend,
 )
@@ -15,7 +14,6 @@ __all__ = [
     "ColumnParallelLinear",
     "DecodeCudaGraphRunner",
     "DecodeCudaGraphStats",
-    "FlashAttentionBackend",
     "FlashInferBackend",
     "Qwen3ForCausalLM",
     "RowParallelLinear",

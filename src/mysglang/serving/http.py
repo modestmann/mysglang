@@ -167,6 +167,7 @@ class _ChatOutputParser:
         self.reasoning = ReasoningParser() if reasoning else None
         self.tools = payload.active_tools
         self.tool_buffer = ToolCallStreamBuffer() if self.tools else None
+        self._tool_calls: list[dict[str, Any]] | None = None
 
     def feed(self, text: str, *, final: bool) -> tuple[str, str]:
         reasoning, content = ("", text) if self.reasoning is None else self.reasoning.feed(
@@ -174,13 +175,15 @@ class _ChatOutputParser:
         )
         if self.tool_buffer is not None:
             content = self.tool_buffer.feed(content, final=final)
+            if final and self.tool_buffer.buffering and self._tool_calls is None:
+                fallback, calls = parse_tool_calls(self.tool_buffer.buffered_text(), self.tools)
+                # 截断或格式错误的调用无法解析时，把缓冲内容交还 JSON/SSE 文本输出。
+                content += fallback
+                self._tool_calls = [call.to_openai() for call in calls]
         return reasoning, content
 
     def tool_calls(self) -> list[dict[str, Any]]:
-        if self.tool_buffer is None or not self.tool_buffer.buffering:
-            return []
-        _content, calls = parse_tool_calls(self.tool_buffer.buffered_text(), self.tools)
-        return [call.to_openai() for call in calls]
+        return self._tool_calls or []
 
 
 def create_app(service: GenerationService, *, model_name: str = "mysglang") -> FastAPI:

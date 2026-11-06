@@ -493,29 +493,23 @@ class HybridSchedulerTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available() and importlib.util.find_spec("flash_attn") is not None,
-    "requires CUDA and flash-attn",
+    torch.cuda.is_available() and importlib.util.find_spec("flashinfer") is not None,
+    "requires CUDA and flashinfer",
 )
 class HybridCudaGraphTest(unittest.TestCase):
     """Graph replay must reproduce eager Decode, MTP drafts, verify and state commits."""
 
     @torch.inference_mode()
     def test_graph_paths_match_eager_generation(self) -> None:
-        from mysglang import FlashAttentionBackend, FlashInferBackend
+        from mysglang import FlashInferBackend
 
-        cases = [
-            ("flash", 256, 32, moe, steps) for moe, steps in ((False, 0), (False, 3), (True, 2))
-        ]
-        if importlib.util.find_spec("flashinfer") is not None:
-            # FlashInfer：小页（16）+ 它支持的 head_dim 64；verify / 草稿 / 追赶都走它的 kernel。
-            cases += [("flashinfer", 16, 64, False, 0), ("flashinfer", 16, 64, False, 3)]
-        for backend_name, page_size, head_dim, moe, steps in cases:
-            with self.subTest(backend=backend_name, moe=moe, steps=steps):
+        for moe, steps in ((False, 0), (False, 3), (True, 2)):
+            with self.subTest(moe=moe, steps=steps):
                 torch.manual_seed(50)
                 config = hybrid_config(
                     moe=moe,
                     mtp=True,
-                    head_dim=head_dim,
+                    head_dim=64,
                     linear_key_head_dim=16,
                     linear_value_head_dim=16,
                     max_position_embeddings=512,
@@ -523,11 +517,7 @@ class HybridCudaGraphTest(unittest.TestCase):
                 )
                 model = Qwen3ForCausalLM(
                     config,
-                    attention_backend=(
-                        FlashInferBackend()
-                        if backend_name == "flashinfer"
-                        else FlashAttentionBackend()
-                    ),
+                    attention_backend=FlashInferBackend(),
                     moe_dispatch_backend="triton_grouped",
                     enable_mtp=True,
                 )
@@ -542,8 +532,8 @@ class HybridCudaGraphTest(unittest.TestCase):
                         SchedulerConfig(
                             max_running_requests=4,
                             prefill_token_budget=256,
-                            num_pages=2048 // page_size,
-                            page_size=page_size,
+                            num_pages=128,
+                            page_size=16,
                             speculative_mtp_steps=steps,
                             decode_cuda_graph_batch_sizes=sizes,
                         ),

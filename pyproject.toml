@@ -31,8 +31,12 @@ model = [
     "safetensors>=0.8,<1",
     "transformers>=5,<6",
 ]
-flash-attn = [
-    "flash-attn>=2.8,<3",
+vision = [
+    "numpy>=1.26",
+    "pillow>=10",
+]
+flashinfer = [
+    "flashinfer-python>=0.7,<0.8",
     "triton>=3,<4",
 ]
 

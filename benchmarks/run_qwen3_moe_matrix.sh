@@ -4,7 +4,7 @@ set -euo pipefail
 model=${MODEL:-/root/models/Qwen3-30B-A3B}
 output=${OUTPUT:-benchmarks/results/qwen3-30b-a3b-grouped-a2a-4090x4.jsonl}
 repeats=${REPEATS:-3}
-num_pages=${NUM_PAGES:-64}
+num_pages=${NUM_PAGES:-1024}
 
 already_finished() {
   local run_name=$1

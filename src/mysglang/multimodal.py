@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
-import numpy as np
 import torch
 
 from mysglang.config import VisionConfig
@@ -143,7 +142,13 @@ class ImageProcessor:
         )
 
     def preprocess(self, image) -> tuple[torch.Tensor, tuple[int, int, int]]:
-        from PIL import Image
+        try:
+            import numpy as np
+            from PIL import Image
+        except ImportError as exc:
+            raise RuntimeError(
+                "image preprocessing requires the 'vision' project extra (numpy and pillow)"
+            ) from exc
 
         vision = self.vision
         image = load_image(image).convert("RGB")

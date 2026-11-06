@@ -5,7 +5,7 @@ from unittest.mock import patch
 import torch
 
 from mysglang import (
-    FlashAttentionBackend,
+    FlashInferBackend,
     ModelConfig,
     Qwen3ForCausalLM,
     Scheduler,
@@ -15,27 +15,17 @@ from mysglang import (
 from mysglang.cache import PagedKVCache
 from tests.helpers import drain_scheduler, make_request
 
-FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
+FLASHINFER_AVAILABLE = importlib.util.find_spec("flashinfer") is not None
 TRITON_AVAILABLE = importlib.util.find_spec("triton") is not None
 
 
 class AttentionBackendTest(unittest.TestCase):
-    @unittest.skipUnless(FLASH_ATTN_AVAILABLE, "requires flash-attn")
-    def test_flash_backend_rejects_incompatible_page_size_before_serving(self) -> None:
-        model = Qwen3ForCausalLM(
-            ModelConfig(),
-            attention_backend=FlashAttentionBackend(),
-        )
-
-        with self.assertRaisesRegex(ValueError, "multiple of 256"):
-            Scheduler(model, SchedulerConfig(page_size=4))
-
     @unittest.skipUnless(
-        FLASH_ATTN_AVAILABLE and torch.cuda.is_available(),
-        "requires CUDA and flash-attn",
+        FLASHINFER_AVAILABLE and torch.cuda.is_available(),
+        "requires CUDA and flashinfer",
     )
     @torch.inference_mode()
-    def test_flash_backend_matches_torch_with_paged_kv(self) -> None:
+    def test_flashinfer_backend_matches_torch_with_paged_kv(self) -> None:
         config = ModelConfig(
             vocab_size=64,
             hidden_size=128,
@@ -43,6 +33,7 @@ class AttentionBackendTest(unittest.TestCase):
             num_layers=2,
             num_attention_heads=4,
             num_key_value_heads=2,
+            head_dim=64,
             max_position_embeddings=512,
         )
         torch.manual_seed(2027)
@@ -54,29 +45,38 @@ class AttentionBackendTest(unittest.TestCase):
             .cuda()
             .half()
         )
-        flash = (
+        flashinfer = (
             Qwen3ForCausalLM(
                 config,
-                attention_backend=FlashAttentionBackend(),
+                attention_backend=FlashInferBackend(),
             )
             .cuda()
             .half()
         )
-        flash.load_state_dict(reference.state_dict())
+        flashinfer.load_state_dict(reference.state_dict())
 
         input_ids = torch.tensor(
             [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]],
             device="cuda",
         )
+        # FlashInfer 只接收 paged KV；以 Torch 完整重算校验 dense cached prefill。
+        initial_cache = self._make_cache(flashinfer, config)
+        initial_ids = ("dense-a", "dense-b")
+        for request_id in initial_ids:
+            self.assertTrue(initial_cache.reserve_request(request_id, input_ids.size(1)))
+            initial_cache.ensure_capacity(request_id, input_ids.size(1))
         torch.testing.assert_close(
-            flash(input_ids),
+            flashinfer(input_ids, kv_cache=initial_cache, cache_request_ids=initial_ids),
             reference(input_ids),
             atol=3e-3,
             rtol=3e-3,
         )
+        for request_id in initial_ids:
+            initial_cache.release_request(request_id)
+        initial_cache.check_integrity()
 
         packed_reference_cache = self._make_cache(reference, config)
-        packed_flash_cache = self._make_cache(flash, config)
+        packed_flash_cache = self._make_cache(flashinfer, config)
         packed_request_ids = ("packed-short", "packed-long")
         for cache in (packed_reference_cache, packed_flash_cache):
             for request_id, length in zip(packed_request_ids, (3, 5)):
@@ -89,7 +89,7 @@ class AttentionBackendTest(unittest.TestCase):
             cache_request_ids=packed_request_ids,
             append_lengths=(3, 5),
         )
-        actual = flash.forward_packed(
+        actual = flashinfer.forward_packed(
             packed_input,
             kv_cache=packed_flash_cache,
             cache_request_ids=packed_request_ids,
@@ -107,7 +107,7 @@ class AttentionBackendTest(unittest.TestCase):
             cache_request_ids=packed_request_ids,
             append_lengths=(2, 1),
         )
-        actual = flash.forward_packed(
+        actual = flashinfer.forward_packed(
             packed_suffix,
             kv_cache=packed_flash_cache,
             cache_request_ids=packed_request_ids,
@@ -117,7 +117,7 @@ class AttentionBackendTest(unittest.TestCase):
         torch.testing.assert_close(actual, expected[[1, 2]], atol=3e-3, rtol=3e-3)
 
         reference_cache = self._make_cache(reference, config)
-        flash_cache = self._make_cache(flash, config)
+        flash_cache = self._make_cache(flashinfer, config)
         prompts = {
             "short": torch.tensor([[1, 2, 3]], device="cuda"),
             "long": torch.tensor([[4, 5, 6, 7, 8]], device="cuda"),
@@ -132,7 +132,7 @@ class AttentionBackendTest(unittest.TestCase):
                 kv_cache=reference_cache,
                 cache_request_ids=(request_id,),
             )
-            actual = flash(
+            actual = flashinfer(
                 prompt,
                 kv_cache=flash_cache,
                 cache_request_ids=(request_id,),
@@ -155,7 +155,7 @@ class AttentionBackendTest(unittest.TestCase):
             kv_cache=reference_cache,
             cache_request_ids=request_ids,
         )
-        actual = flash(
+        actual = flashinfer(
             next_tokens,
             kv_cache=flash_cache,
             cache_request_ids=request_ids,
@@ -167,11 +167,11 @@ class AttentionBackendTest(unittest.TestCase):
         scheduler_config = SchedulerConfig(
             max_running_requests=2,
             prefill_token_budget=128,
-            num_pages=6,
-            page_size=256,
+            num_pages=96,
+            page_size=16,
         )
         reference_scheduler = Scheduler(reference, scheduler_config)
-        flash_scheduler = Scheduler(flash, scheduler_config)
+        flash_scheduler = Scheduler(flashinfer, scheduler_config)
         seed_prompt = [index % config.vocab_size for index in range(300)]
         expected_tokens = self._run_request(reference_scheduler, "seed", seed_prompt)
         actual_tokens = self._run_request(flash_scheduler, "seed", seed_prompt)
@@ -182,16 +182,16 @@ class AttentionBackendTest(unittest.TestCase):
         expected_tokens = self._run_request(reference_scheduler, "shared", shared_prompt)
         actual_tokens = self._run_request(flash_scheduler, "shared", shared_prompt)
         self.assertEqual(actual_tokens, expected_tokens)
-        self.assertEqual(flash_scheduler.prefill_input_tokens - prefill_before, 44)
+        self.assertEqual(flash_scheduler.prefill_input_tokens - prefill_before, 28)
 
         ragged_config = SchedulerConfig(
             max_running_requests=3,
             prefill_token_budget=128,
-            num_pages=6,
-            page_size=256,
+            num_pages=96,
+            page_size=16,
         )
         reference_ragged = Scheduler(reference, ragged_config)
-        flash_ragged = Scheduler(flash, ragged_config)
+        flash_ragged = Scheduler(flashinfer, ragged_config)
         ragged_prompts = {
             "ragged-short": [index % config.vocab_size for index in range(20)],
             "ragged-medium": [index % config.vocab_size for index in range(70)],
@@ -201,7 +201,7 @@ class AttentionBackendTest(unittest.TestCase):
             for request_id, prompt in ragged_prompts.items():
                 scheduler.add(make_request(request_id, prompt, max_new_tokens=3))
         expected = drain_scheduler(reference_ragged)
-        with patch.object(flash, "forward_packed", wraps=flash.forward_packed) as packed:
+        with patch.object(flashinfer, "forward_packed", wraps=flashinfer.forward_packed) as packed:
             actual = drain_scheduler(flash_ragged)
         self.assertTrue(
             any(
@@ -215,12 +215,12 @@ class AttentionBackendTest(unittest.TestCase):
         graph_base = dict(
             max_running_requests=2,
             prefill_token_budget=512,
-            num_pages=4,
-            page_size=256,
+            num_pages=64,
+            page_size=16,
         )
         reference_graph = Scheduler(reference, SchedulerConfig(**graph_base))
         flash_graph = Scheduler(
-            flash,
+            flashinfer,
             SchedulerConfig(
                 **graph_base,
                 decode_cuda_graph_batch_sizes=(2,),
@@ -257,13 +257,13 @@ class AttentionBackendTest(unittest.TestCase):
         # 只录 batch 4：3 个请求补 1 个假请求、之后 2 个请求补 2 个，结果必须与 eager 一致，
         # 假请求只写垃圾页，真请求的页与长度不受影响。
         padded_base = dict(
-            max_running_requests=4, prefill_token_budget=1024, num_pages=6, page_size=256
+            max_running_requests=4, prefill_token_budget=1024, num_pages=96, page_size=16
         )
         eager = Scheduler(reference, SchedulerConfig(**padded_base))
         padded = Scheduler(
-            flash, SchedulerConfig(**padded_base, decode_cuda_graph_batch_sizes=(4,))
+            flashinfer, SchedulerConfig(**padded_base, decode_cuda_graph_batch_sizes=(4,))
         )
-        self.assertEqual(padded.cache.scratch_page, 6)
+        self.assertEqual(padded.cache.scratch_page, 96)
         # 启动时就用全是假请求的 batch 录好，之后跑真请求不再捕获。
         self.assertEqual(padded.stats.cuda_graph_captures, 1)
         self.assertEqual(padded.stats.cuda_graph_replays, 0)
@@ -283,8 +283,8 @@ class AttentionBackendTest(unittest.TestCase):
         padded.check_integrity()
 
     @unittest.skipUnless(
-        FLASH_ATTN_AVAILABLE and TRITON_AVAILABLE and torch.cuda.is_available(),
-        "requires CUDA, flash-attn and Triton",
+        FLASHINFER_AVAILABLE and TRITON_AVAILABLE and torch.cuda.is_available(),
+        "requires CUDA, flashinfer and Triton",
     )
     @torch.inference_mode()
     def test_moe_decode_cuda_graph_matches_eager(self) -> None:
@@ -296,6 +296,7 @@ class AttentionBackendTest(unittest.TestCase):
             num_layers=2,
             num_attention_heads=4,
             num_key_value_heads=2,
+            head_dim=64,
             max_position_embeddings=512,
             num_experts=4,
             num_experts_per_tok=2,
@@ -306,7 +307,7 @@ class AttentionBackendTest(unittest.TestCase):
         eager_model = (
             Qwen3ForCausalLM(
                 config,
-                attention_backend=FlashAttentionBackend(),
+                attention_backend=FlashInferBackend(),
                 moe_dispatch_backend="triton_grouped",
             )
             .cuda()
@@ -315,7 +316,7 @@ class AttentionBackendTest(unittest.TestCase):
         graph_model = (
             Qwen3ForCausalLM(
                 config,
-                attention_backend=FlashAttentionBackend(),
+                attention_backend=FlashInferBackend(),
                 moe_dispatch_backend="triton_grouped",
             )
             .cuda()
@@ -325,8 +326,8 @@ class AttentionBackendTest(unittest.TestCase):
         scheduler_base = dict(
             max_running_requests=2,
             prefill_token_budget=512,
-            num_pages=4,
-            page_size=256,
+            num_pages=64,
+            page_size=16,
         )
         eager = Scheduler(eager_model, SchedulerConfig(**scheduler_base))
         graph = Scheduler(
@@ -354,8 +355,8 @@ class AttentionBackendTest(unittest.TestCase):
         parameter = next(model.parameters())
         return PagedKVCache.from_config(
             config,
-            num_pages=4,
-            page_size=256,
+            num_pages=64,
+            page_size=16,
             dtype=parameter.dtype,
             device=parameter.device,
         )
@@ -370,16 +371,6 @@ class AttentionBackendTest(unittest.TestCase):
         return drain_scheduler(scheduler)[request_id]
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-FLASHINFER_AVAILABLE = importlib.util.find_spec("flashinfer") is not None
-
-
-@unittest.skipUnless(
-    FLASHINFER_AVAILABLE and torch.cuda.is_available(), "requires CUDA and flashinfer"
-)
 class FlashInferBackendTest(unittest.TestCase):
     """FlashInfer must reproduce the torch oracle at any page size, eager and under Graph."""
 
@@ -391,17 +382,21 @@ class FlashInferBackendTest(unittest.TestCase):
             ([0, 3, 4, 6], [3, 0, 5, 7, 2, 9], [2, 4, 2]),
         )
 
+    @unittest.skipUnless(
+        FLASHINFER_AVAILABLE and torch.cuda.is_available(), "requires CUDA and flashinfer"
+    )
     def test_matches_torch_backend_at_small_page_sizes(self) -> None:
         self._check_against_torch(num_attention_heads=4, num_key_value_heads=2)
 
+    @unittest.skipUnless(
+        FLASHINFER_AVAILABLE and torch.cuda.is_available(), "requires CUDA and flashinfer"
+    )
     def test_tensor_core_decode_for_unsupported_group_size(self) -> None:
         # 组大小 5（如 Qwen3-14B 的 40/8）不在非 TC decode kernel 的编译列表里，必须走 tensor core
         self._check_against_torch(num_attention_heads=5, num_key_value_heads=1)
 
     @torch.inference_mode()
     def _check_against_torch(self, num_attention_heads: int, num_key_value_heads: int) -> None:
-        from mysglang import FlashInferBackend
-
         config = ModelConfig(
             vocab_size=64,
             hidden_size=256,
@@ -428,7 +423,7 @@ class FlashInferBackendTest(unittest.TestCase):
                     base = dict(
                         max_running_requests=4,
                         prefill_token_budget=24,  # 分块 prefill，并与 decode 拼成混合步
-                        num_pages=600 // page_size,
+                        num_pages=9600 // page_size,
                         page_size=page_size,
                     )
                     # 每个子测试用全新的 backend：图在任何 eager forward 之前录制
@@ -461,3 +456,7 @@ class FlashInferBackendTest(unittest.TestCase):
                         self.assertIs(backend._graph_wrappers[key], wrapper)
                     schedulers[1].close()
                     self.assertEqual(backend._graph_wrappers, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

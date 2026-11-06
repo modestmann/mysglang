@@ -82,7 +82,7 @@ class DecodeCudaGraphRunner:
             raise RuntimeError("Decode CUDA Graph requires a CUDA model")
         if not getattr(model.attention_backend, "supports_cuda_graph", False):
             raise RuntimeError(
-                "Decode CUDA Graph requires a graph-capable attention backend (flash / flashinfer)"
+                "Decode CUDA Graph requires a graph-capable attention backend (flashinfer)"
             )
         # FlashInfer 在图外按每批 metadata 规划，需要知道本 rank 的 query 头数。
         self._graph_owner = next(_RUNNER_IDS)  # 不用 id(self)：runner 回收后 id 可能被复用
@@ -237,7 +237,7 @@ class DecodeCudaGraphRunner:
             else self._recurrent.prepare_decode_batch(request_ids, bucket.state)
         )
         # Graph bucket 的地址保持不变，每轮只更新其中的内容。
-        # 规划 attention metadata 必须在图外、捕获和每次重放之前（FlashInfer；FA2 什么都不做）。
+        # 规划 attention metadata 必须在图外、捕获和每次重放之前（FlashInfer）。
         self._prepare_attention(size, batch)
         # 假请求输入 token 0：算出来什么都无所谓，结果不会被读。
         padded_tokens = tuple(input_token_ids) + (0,) * (padding * self.append_length)

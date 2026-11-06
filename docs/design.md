@@ -156,11 +156,11 @@ KV address    = pool[layer, 1, 2]
 | Backend | KV 路径 | 用途 |
 |---|---|---|
 | `TorchAttentionBackend` | 写页后 gather；dense batch 用 padded SDPA，packed batch 逐请求调用 SDPA | CPU 测试与 correctness oracle |
-| `FlashAttentionBackend` | 纯 Decode 使用 `flash_attn_with_kvcache`；Prefill 和混合 batch 使用 slot scatter + paged `flash_attn_varlen_func` | CUDA Prefill/Decode |
+| `FlashInferBackend` | slot scatter 写 KV；Decode / Prefill wrapper 读取 CSR 页表，规划一次、各层复用 | CUDA Prefill/Decode 与 CUDA Graph |
 
-模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FA2 varlen kernel 再直接按 block table 读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
+模型在进入第一层前调用一次 `PagedKVCache.prepare_batch()`，生成所有层共享的 request IDs、追加范围、block table、`cu_seqlens_q/k` 和 `slot_mapping`。每层的 `prepare_append()` 只校验本层状态并取得对应的物理 K/V pool view。packed 新 K/V 通过向量化 `index_copy_` 按 slot mapping 写页，FlashInfer prefill kernel 再直接按 CSR 页表读取完整历史；不会构造 padded Q/K/V。attention 成功后 backend 才调用 `commit_append()` 更新该层逻辑长度，因此 kernel 抛错时长度不会提前提交。
 
-当前安装的 FA2 paged kernel 要求 CUDA fp16/bf16、head dimension 不超过 256，并要求 `page_size` 是 256 的倍数。`FlashInferBackend`（`--backend flashinfer --page-size 16|1`）用 CSR 页表（indptr / indices / last_page_len）支持任意页大小，每次 forward 规划一次、各层共用；CUDA Graph 下每个 bucket 一个固定缓冲区的 wrapper，plan 在图外执行。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。
+GPU attention 使用 CUDA fp16/bf16；默认页大小是 16，也可设为 1。`FlashInferBackend`（`--backend flashinfer --page-size 16|1`）用 CSR 页表（indptr / indices / last_page_len）支持任意页大小，每次 forward 规划一次、各层共用；CUDA Graph 下每个 bucket 一个固定缓冲区的 wrapper，plan 在图外执行。Scheduler 创建 cache 后立即调用 backend 校验，因此错误配置会在 serving 开始前失败。纯 Decode 使用 dense `[batch, 1]`；Prefill 和混合 batch 使用 `[total_query_tokens]` packed 输入，不同请求由累计长度分隔。
 
 ### Decode metadata buffer 与 CUDA Graph
 
@@ -191,7 +191,7 @@ static block_table [B, max_blocks]
 static cache_seqlens / positions / slot_mapping / cu_seqlens
 ```
 
-每轮仍由 Scheduler 选择请求，并在 Graph 外把新值原地写入这些 buffer；replay 中的 FA2 kernel 会从相同地址读取本轮的新内容。地址不变不等于值不变。`Qwen3ForCausalLM.forward_prepared()` 让 eager 和 Graph 共用已经准备好的 `PagedKVBatch`，避免模型内部重新分配 metadata。未配置 Graph 的纯 Decode 也按 batch size 复用这套 metadata buffer。
+每轮仍由 Scheduler 选择请求，并在 Graph 外把新值原地写入这些 buffer；replay 中的 FlashInfer kernel 会从相同地址读取本轮的新内容。地址不变不等于值不变。`Qwen3ForCausalLM.forward_prepared()` 让 eager 和 Graph 共用已经准备好的 `PagedKVBatch`，避免模型内部重新分配 metadata。未配置 Graph 的纯 Decode 也按 batch size 复用这套 metadata buffer。
 
 普通 Decode 图按 bucket 补齐：batch 向上取最近的已录大小（`bisect_left`），多出来的行是假请求，block table 指向专用的垃圾页（DeltaNet 指向垃圾状态格子），长度为 0、只写垃圾页、不参与 `commit_batch()`，输出只取前 `batch_size` 行。启动时 `capture_all()` 用全假请求 batch 预录全部 bucket，避免第一次命中某个大小时现场捕获造成 ITL 尖峰（最大 ITL 125 → 17 ms）。MTP 的 verify/草稿/追赶图仍只录精确大小。CLI 默认 bucket 为 1、2、4 加 8 的倍数直到 `max_running_requests`。
 
@@ -238,13 +238,13 @@ per-session trie，并可以生成 token tree 让主模型一次验证；这会�
 
 投机路径不会相信 n-gram 猜测：每个候选仍由目标模型 logits 验证，所以接受规则和
 KV 回滚在算法上是精确的。但关闭投机时的单 token Decode 使用
-`flash_attn_with_kvcache`，投机验证使用 packed/varlen attention；二者在 BF16 下可能有
+FlashInfer decode kernel，投机验证使用 packed prefill kernel；二者在 BF16 下可能有
 不同的分块、累加和归约顺序。若两个 token 的 logits 极其接近，最后几位舍入差异可能
 改变 greedy `argmax`，随后两次生成会走向不同但都有效的分支。这属于 kernel 数值路径
 差异，不应在未排查前归因于请求串扰或 KV 回滚错误。
 
 因此验收分三层：先用 Torch attention 检查 eager/投机的逐 token 精确一致，以覆盖
-Scheduler、packed 分段和 KV 回滚；再用 FA2 检查单请求精确一致；最后对并发 FA2 保存
+Scheduler、packed 分段和 KV 回滚；再用 FlashInfer 检查单请求精确一致；最后对并发 FlashInfer 保存
 首次分叉位置，并把不同 kernel 的结果称为数值等价生成，而不是宣称 bitwise greedy
 一致。若产品必须保证逐 token 重现，需要让基线和 verifier 走同一种 kernel/精度，代价
 通常是放弃部分 packed verification 性能。
@@ -329,7 +329,7 @@ decoder 每次重新解码累计 token，并维护已经发送的稳定前缀 `s
 
 Sampling 在每个 Request 上保存 temperature/top-k/top-p/seed。Scheduler 为每个非 greedy 请求建立独立的 device generator，因此随机序列不会因请求与谁组成 batch 而改变；CUDA Graph 当前只用于全 greedy 的 Decode batch。N-gram 统计分开记录草稿数和被接受草稿数；bonus/纠错 token 是主模型正常输出，不计入 accepted draft。
 
-本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 Qwen3-30B-A3B 也已在 4×RTX 4090 上完成 BF16/FA2 加载、Transformers greedy token oracle 和 naive/sorted 三轮性能验收，详见 [实测报告](../benchmarks/results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
+历史版本中，本地 dense Qwen3-0.6B 已完成 311 个 SafeTensors tensor 加载、FP32 reference logits 对齐、BF16 FA2 paged 单请求生成和并发 batch smoke test。小型 dense 与 MoE 配置均逐层或最终 logits 对齐 Transformers；MoE TP=2 的 packed/逐-expert checkpoint 加载、forward 和 continuous batching 已与 TP=1 对齐。真实 Qwen3-30B-A3B 也已在 4×RTX 4090 上完成 BF16/FA2 加载、Transformers greedy token oracle 和 naive/sorted 三轮性能验收，详见 [实测报告](../benchmarks/results/2026-09-21-qwen3-30b-a3b-4090x4/report.md)。
 
 ## 6. Tensor Parallel 与多进程调度
 
@@ -593,7 +593,7 @@ MTP 在位置 `p` 的输入是 `fc([norm(embed(t_{p+1})), norm(h_p)])`，`h_p` �
 
 因此 Qwen3.6 官方推荐的采样设置（如 temperature=0.6/1.0、presence_penalty=1.5）下同样能用 MTP。
 
-**数值说明。** fp32 + PyTorch reference 后端下，MTP 开/关对 4 个并发请求的 96 个 token 逐位一致；bf16 + FA2/fla 下，verify 一次处理 `k+1` 个 token，GEMM/attention 的 kernel 形状与单 token Decode 不同，接近平局的 argmax 可能在几十个 token 后分叉。这是舍入差异，不是回滚错误（与 n-gram 的结论相同）。
+**数值说明。** fp32 + PyTorch reference 后端下，MTP 开/关对 4 个并发请求的 96 个 token 逐位一致；bf16 + CUDA attention/fla 下，verify 一次处理 `k+1` 个 token，GEMM/attention 的 kernel 形状与单 token Decode 不同，接近平局的 argmax 可能在几十个 token 后分叉。这是舍入差异，不是回滚错误（与 n-gram 的结论相同）。
 
 ### CUDA Graph
 
@@ -667,7 +667,7 @@ Scheduler：首个 Prefill chunk 时 encode_images（ViT + 合并器）一次，
 | Admission | 基于 available size 与 inflight 估算 | reservation 与实际 page binding 分开，行为保守但易验证 |
 | Radix | tensor key、快速比较 kernel、timestamp + leaf heap | Python tuple key、timestamp + leaf heap |
 | 防御能力 | `reset()` 未实现，integrity checker 为空 | reset、stats、tree/allocator/scheduler 完整检查 |
-| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FA2 paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；Triton MoE/TP Graph/n-gram 均已四卡实测 |
+| 执行性能 | 真实模型、GPU attention、CUDA Graph、TP 等完整路径 | dense/MoE Qwen3、FlashInfer paged attention、Decode Graph、TP，以及 grouped/all-to-all reference；历史 Triton MoE/TP Graph/n-gram 四卡结果见归档报告 |
 
 双方的 Radix eviction 都不是双向链表 LRU。MySGLang 对显式状态、验证和 reference oracle 的加强服务于学习与调试；Mini-SGLang 的 kernel、metadata 和分布式路径则远比当前项目完整。
 

@@ -1167,7 +1167,7 @@ class Qwen3ForCausalLM(nn.Module):
         """Uncached oracle forward, or a dense cached forward over ``cache_request_ids``.
 
         ``mrope_positions`` (``[3, batch, sequence]``) and ``embedding_overrides`` let the
-        uncached path reproduce an image prompt end to end."""
+        cached and uncached paths reproduce an image prompt end to end."""
         if input_ids.ndim != 2:
             raise ValueError("input_ids must have shape [batch, sequence]")
         if input_ids.size(1) == 0:
@@ -1185,10 +1185,13 @@ class Qwen3ForCausalLM(nn.Module):
                 raise ValueError("cache_request_ids length must match input batch size")
             append_lengths = (input_ids.size(1),) * input_ids.size(0)
             cache_batch = kv_cache.prepare_batch(cache_request_ids, append_lengths)
+            if mrope_positions is not None:
+                cache_batch = replace(cache_batch, mrope_positions=mrope_positions)
             return self.forward_prepared(
                 input_ids,
                 kv_cache=kv_cache,
                 cache_batch=cache_batch,
+                embedding_overrides=embedding_overrides,
             )
         else:
             raise TypeError(f"unsupported KV cache type: {type(kv_cache).__name__}")
