@@ -1,0 +1,143 @@
+{
+  "model": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main",
+  "config": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main/inference/config.json",
+  "tp_size": 8,
+  "backend": "triton",
+  "precision": "MXFP4 experts / MXFP8 dense / BF16 activations",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA H20-3e",
+  "load_seconds": 17.992100586008746,
+  "load_report": {
+    "shards": 48,
+    "tensor_count": 96085,
+    "checkpoint_bytes": 510286023000,
+    "header_bytes_read": 10685312,
+    "headers_sha256": "48407268fc4668288501ff5aa08b8965c81f9aafc55e3fad44647e5238163bb5",
+    "rank": 0,
+    "world_size": 8,
+    "loaded_tensors": 12738,
+    "loaded_bytes": 64986171656,
+    "source_bytes_copied": 64818563336,
+    "excluded_groups": [
+      "vision",
+      "draft"
+    ],
+    "chunk_bytes": 67108864
+  },
+  "peak_allocated_bytes": 67020746240,
+  "peak_reserved_bytes": 73901539328,
+  "generations": [
+    {
+      "prompt": "What is 2 + 2? Answer with just the number.",
+      "prompt_tokens": 18,
+      "token_ids": [
+        22,
+        1
+      ],
+      "text": "4",
+      "finish_reason": "eos",
+      "prefill_seconds": 1.713597922003828,
+      "decode_seconds": [
+        0.29557320999447256
+      ],
+      "torch_comparison": [
+        {
+          "max_abs_error": 2.360508918762207,
+          "cosine_similarity": 0.98627108335495,
+          "greedy_equal": true
+        },
+        {
+          "max_abs_error": 2.575681686401367,
+          "cosine_similarity": 0.9839527606964111,
+          "greedy_equal": true
+        }
+      ]
+    },
+    {
+      "prompt": "用一句话介绍你自己。",
+      "prompt_tokens": 9,
+      "token_ids": [
+        10805,
+        53091,
+        4374,
+        1465,
+        303,
+        1516,
+        17180,
+        1645,
+        4568,
+        2086,
+        81502,
+        13503,
+        52334,
+        303,
+        20542,
+        34448,
+        3796,
+        6399,
+        410,
+        20750,
+        2056,
+        303,
+        1380,
+        68398,
+        52720,
+        7664,
+        1175,
+        1
+      ],
+      "text": "我是DeepSeek，由深度求索公司创造的AI助手，随时为你提供帮助、解答问题，并乐于与你交流！",
+      "finish_reason": "eos",
+      "prefill_seconds": 0.5004023869987577,
+      "decode_seconds": [
+        0.27574663900304586,
+        0.2650174740119837,
+        0.276556887984043,
+        0.2726917260151822,
+        0.2673278359870892,
+        0.27613663900410756,
+        0.27351894302410074,
+        0.2736946929944679,
+        0.2692045599978883,
+        0.26780918598524295,
+        0.27412318397546187,
+        0.2783217280230019,
+        0.27225605701096356,
+        0.2676041460072156,
+        0.2743760209996253,
+        0.2699333990167361,
+        0.26912490400718525,
+        0.2694644459988922,
+        0.2740522150124889,
+        1.3442793959984556,
+        1.338700193009572,
+        1.3820902970037423,
+        1.3654996630211826,
+        1.3883345829963218,
+        1.3964118869917002,
+        1.3925136100151576,
+        1.404358333995333
+      ],
+      "torch_comparison": [
+        {
+          "max_abs_error": 2.132693290710449,
+          "cosine_similarity": 0.9914649128913879,
+          "greedy_equal": true
+        },
+        {
+          "max_abs_error": 3.01216983795166,
+          "cosine_similarity": 0.9902290105819702,
+          "greedy_equal": true
+        },
+        {
+          "max_abs_error": 2.924501657485962,
+          "cosine_similarity": 0.9914674162864685,
+          "greedy_equal": true
+        }
+      ]
+    }
+  ],
+  "validation_cache_state": "Filesystem and Triton caches warmed by earlier validation runs; this is not a cold-start benchmark.",
+  "validation_scope": "Pure-text greedy generation, one request at a time, full 40-layer native model, TP/EP=8, no vision or draft."
+}

@@ -1,0 +1,100 @@
+{
+  "shards": 48,
+  "tensor_count": 96085,
+  "checkpoint_bytes": 510286023000,
+  "header_bytes_read": 10685312,
+  "headers_sha256": "48407268fc4668288501ff5aa08b8965c81f9aafc55e3fad44647e5238163bb5",
+  "model_path": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main",
+  "tp_size": 8,
+  "text_only": true,
+  "include_draft": false,
+  "source_bytes_by_group": {
+    "vision": 970536960,
+    "backbone_other": 9846748608,
+    "routed_experts": 288777830400,
+    "draft": 7932874632,
+    "engram_tables": 202758032400
+  },
+  "source_bytes_by_dtype": {
+    "BF16": 3952883712,
+    "F32": 169229128,
+    "F8_E8M0": 23563015184,
+    "F8_E4M3": 204015223296,
+    "I8": 278585671680
+  },
+  "included_source_bytes": 501382611408,
+  "tensor_count_by_rule": {
+    "tensor_parallel": 306,
+    "replicated": 948,
+    "expert_parallel": 92160,
+    "engram_row_shard": 4
+  },
+  "estimated_rank_weight_bytes": [
+    64986171656,
+    64986171656,
+    64986171656,
+    64986171656,
+    64986171656,
+    64986171656,
+    64986171656,
+    64986171656
+  ],
+  "estimated_rank_weight_bytes_by_group": [
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    },
+    {
+      "backbone_other": 3544188608,
+      "routed_experts": 36097228800,
+      "engram_tables": 25344754248
+    }
+  ],
+  "scope": "headers_only; backbone/scale shapes checked; tensor payloads not read",
+  "memory_policy": "official-reference TP/EP + padded Engram row shards + BF16 wo_a",
+  "excluded_memory": [
+    "KV/index/Engram history caches",
+    "activations",
+    "dequantization workspace",
+    "communication buffers",
+    "CUDA graphs",
+    "allocator overhead"
+  ],
+  "limitations": [
+    "vision/draft topology is not fully shape-validated",
+    "estimated resident weights are not measured GPU memory"
+  ],
+  "config_path": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main/inference/config.json",
+  "config_sha256": "2e84f45cf1dac8c7fcbb200e96667d4b913275690668ed496f24c7747207a809"
+}

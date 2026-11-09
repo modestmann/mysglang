@@ -1,0 +1,150 @@
+{
+  "scope": "tiny text FP32; unquantized weights/activations; identity compressed token map",
+  "reference_adjustments": [
+    "FP32 storage/GEMM and sparse-attention oracle",
+    "SGLang pure-Torch Sinkhorn oracle",
+    "stable position order for equal sparse-index scores",
+    "return logits at every position"
+  ],
+  "not_validated": [
+    "MXFP4/MXFP8 rounding",
+    "real checkpoint outputs",
+    "TP execution",
+    "vision",
+    "DSpark",
+    "paged scheduler"
+  ],
+  "torch": "2.13.0+cu130",
+  "python": "3.12.16",
+  "device": "cpu",
+  "config": {
+    "model_type": "deepseek_v41",
+    "vocab_size": 64,
+    "dim": 32,
+    "moe_inter_dim": 24,
+    "n_layers": 6,
+    "n_heads": 4,
+    "n_routed_experts": 4,
+    "n_shared_experts": 1,
+    "n_activated_experts": 2,
+    "score_func": "sqrtsoftplus",
+    "gate_temp": 1.0,
+    "norm_topk_prob": true,
+    "route_scale": 1.5,
+    "swiglu_limit": 10.0,
+    "q_lora_rank": 16,
+    "head_dim": 16,
+    "rope_head_dim": 8,
+    "norm_eps": 1e-20,
+    "o_groups": 2,
+    "o_lora_rank": 8,
+    "window_size": 4,
+    "compress_ratios": [
+      0,
+      2,
+      2,
+      1,
+      1,
+      1
+    ],
+    "kv_source_layers": [
+      1,
+      3
+    ],
+    "index_source_layers": [
+      1,
+      3,
+      5
+    ],
+    "original_seq_len": 16,
+    "rope_theta": 10000.0,
+    "compress_rope_theta": 160000.0,
+    "rope_factor": 16.0,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "index_n_heads": 2,
+    "index_head_dim": 8,
+    "index_topk": 2,
+    "candidate_source_layer": 3,
+    "candidate_topk_blocks": 2,
+    "candidate_block_size": 2,
+    "hc_mult": 4,
+    "hc_sinkhorn_iters": 20,
+    "hc_eps": 1e-06,
+    "engram_layer_ids": [
+      1,
+      4
+    ],
+    "engram_num_embeddings": [
+      834,
+      1020
+    ],
+    "engram_max_ngram_size": 4,
+    "engram_vocab_size": 127,
+    "engram_n_heads": 2,
+    "engram_head_dim": 8,
+    "engram_pad_id": 2,
+    "engram_compressed_vocab_size": 64,
+    "dtype": "bf16",
+    "expert_dtype": null,
+    "n_mtp_layers": 0,
+    "dspark_block_size": 0,
+    "dspark_noise_token_id": 128799,
+    "dspark_target_layer_ids": [],
+    "dspark_markov_rank": 256,
+    "dspark_n_routed_experts": 128,
+    "dspark_n_activated_experts": 3,
+    "vision_n_layers": 0
+  },
+  "vllm_revision": "1c8ecd744d6f0c2096057d928cc19995401d9180",
+  "sglang_revision": "1442917b4a1cfdf5cc77fe0a8869aa05605e9ac7",
+  "reference_source_sha256": {
+    "model.py": "e5decd76fe70fd56ef2f10124d245c6f64fb6a0003cc9068a1d3182a168b8d2d",
+    "engram.py": "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897"
+  },
+  "vllm_engram_layout_and_multipliers_equal": true,
+  "sglang_engram_hashes_equal": true,
+  "runs": [
+    {
+      "seed": 0,
+      "max_logits_abs_error": 2.562999725341797e-06,
+      "max_hidden_abs_error": 1.3113021850585938e-06,
+      "expert_indices_equal": true
+    },
+    {
+      "seed": 3,
+      "max_logits_abs_error": 1.4603137969970703e-06,
+      "max_hidden_abs_error": 8.344650268554688e-07,
+      "expert_indices_equal": true
+    },
+    {
+      "seed": 17,
+      "max_logits_abs_error": 1.5497207641601562e-06,
+      "max_hidden_abs_error": 1.0728836059570312e-06,
+      "expert_indices_equal": true
+    }
+  ],
+  "mysglang_revision": "1d878e095cc746cc449bc30206965272101b732a",
+  "mysglang_worktree_dirty": true,
+  "implementation_sha256": {
+    "src/mysglang/modeling/deepseek_v41/__init__.py": "841e5e2cdc6bcf9f2930129a6c9d112c5011ffd6326929955a57ff718fb996dd",
+    "src/mysglang/modeling/deepseek_v41/checkpoint.py": "0abaa50bf88961168be3faeafdc84cad5d75b4d436eac2508086e821b8847901",
+    "src/mysglang/modeling/deepseek_v41/config.py": "4dcdca04e5e1868db60e2f69242ca761d959aafa7048e1ac5be710b5bce241ce",
+    "src/mysglang/modeling/deepseek_v41/engram.py": "8f2f43786e0b2ded0c0a09b5685ba2d9abe4aacb647682241656cce1d358ac79",
+    "src/mysglang/modeling/deepseek_v41/model.py": "a7a404b4bba1d1b6915d6451492ce3dfbf946acc2b0adb5a25e8a471512550b1",
+    "src/mysglang/modeling/deepseek_v41/ops.py": "e3a32abbd51a7a3c5e392312e42ca5f78b0d297feb964d8487297ed0644c88ff",
+    "benchmarks/validate_deepseek_v41.py": "4d809b18d0051a6ca77d9d43101fdee579343b26dd8c563985bea6d17c026f9e"
+  },
+  "tokenizer_validation": {
+    "vocab_size": 129280,
+    "compressed_vocab_size": 99092,
+    "token_map_sha256": "26b9be2936d236a124ba318a998c417bc7032e3e92a3107fe98deee49f1dc496",
+    "tokenizer_file_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+    "matches": [
+      "official",
+      "vllm",
+      "sglang"
+    ],
+    "release_config_hashes_match_frameworks": true
+  }
+}

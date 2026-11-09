@@ -146,6 +146,11 @@ Triton、MoE Graph 与 n-gram A/B 均已完成。不再扩展 TP×EP mesh。
 
 ## 8. 可选方向
 
+DeepSeek V4.1 已建立小模型数学基准、原生 MXFP4/MXFP8 分片加载和 H20 Triton
+计算路径，并通过真实权重 8 卡纯文本生成。下一步将专属状态接入分页 Scheduler，
+再验证长上下文、前缀复用、抢占恢复。常驻多轮 CLI、跨轮缓存复用、流式输出与
+Gloo 交互控制已经接入；见 [专门的适配说明](deepseek_v41.md)。
+
 - 更完整的 n-gram trie/token tree、草稿模型投机和精确随机采样验证；
 - host/disk 分层 KV Cache 与异步预取；
 - cache-aware routing 和跨实例前缀复用；

@@ -26,6 +26,12 @@ Qwen3.5/3.6 混合架构已与 Transformers 小模型（dense 与 MoE）logits �
 
 ## 当前主调用链
 
+DeepSeek V4.1 已支持原生 MXFP4/MXFP8 权重加载、attention TP / expert EP /
+Engram 行分片，并在 8 张 H20 上完成真实纯文本生成。独立入口为
+`python -m mysglang.deepseek_cli`；`--interactive` 支持常驻、多轮上下文和流式回答。
+本机可以直接运行 `bash scripts/chat_deepseek_v41.sh`。尚未接入下述 Scheduler/HTTP 服务链；
+用法、验证边界及后续步骤见 [docs/deepseek_v41.md](docs/deepseek_v41.md)。
+
 ```text
 HTTP / caller
   -> GenerationService.start

@@ -15,8 +15,16 @@ dependencies = [
 [project.scripts]
 mysglang-chat = "mysglang.cli:main"
 mysglang-serve = "mysglang.server:main"
+mysglang-deepseek = "mysglang.deepseek_cli:main"
 
 [project.optional-dependencies]
+deepseek = [
+    "torch>=2.13,<3",
+    "numpy>=1.26",
+    "safetensors>=0.8,<1",
+    "tokenizers>=0.22,<1",
+    "triton>=3.7,<4",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.8",
@@ -27,6 +35,7 @@ serve = [
     "uvicorn>=0.30",
 ]
 model = [
+    "numpy>=1.26",
     "huggingface-hub>=1,<2",
     "safetensors>=0.8,<1",
     "transformers>=5,<6",

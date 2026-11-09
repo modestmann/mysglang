@@ -1,0 +1,231 @@
+{
+  "model": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main",
+  "config": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main/inference/config.json",
+  "tp_size": 8,
+  "backend": "triton",
+  "precision": "MXFP4 experts / MXFP8 dense / BF16 activations",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA H20-3e",
+  "load_seconds": 13.076518444984686,
+  "load_report": {
+    "shards": 48,
+    "tensor_count": 96085,
+    "checkpoint_bytes": 510286023000,
+    "header_bytes_read": 10685312,
+    "headers_sha256": "48407268fc4668288501ff5aa08b8965c81f9aafc55e3fad44647e5238163bb5",
+    "rank": 0,
+    "world_size": 8,
+    "loaded_tensors": 12738,
+    "loaded_bytes": 64986171656,
+    "source_bytes_copied": 64818563336,
+    "excluded_groups": [
+      "vision",
+      "draft"
+    ],
+    "chunk_bytes": 67108864
+  },
+  "peak_allocated_bytes": 65470060544,
+  "peak_reserved_bytes": 72014102528,
+  "interactive": true,
+  "generations": [
+    {
+      "session": 1,
+      "prompt": "请记住我的名字叫小林，只回复“记住了”。",
+      "prompt_tokens": 16,
+      "prefill_tokens": 16,
+      "reused_tokens": 0,
+      "token_ids": [
+        111205,
+        1
+      ],
+      "text": "记住了",
+      "finish_reason": "eos",
+      "prefill_seconds": 8.283543626021128,
+      "decode_seconds": [
+        2.645510116009973
+      ],
+      "torch_comparison": [],
+      "turn": 1,
+      "history_tokens": 18
+    },
+    {
+      "session": 1,
+      "prompt": "我叫什么名字？只回答名字。",
+      "prompt_tokens": 29,
+      "prefill_tokens": 12,
+      "reused_tokens": 17,
+      "token_ids": [
+        109153,
+        1
+      ],
+      "text": "小林",
+      "finish_reason": "eos",
+      "prefill_seconds": 2.953418805031106,
+      "decode_seconds": [
+        1.3979788970318623
+      ],
+      "torch_comparison": [],
+      "turn": 2,
+      "history_tokens": 31
+    },
+    {
+      "session": 1,
+      "prompt": "我叫什么名字？只回答名字。",
+      "prompt_tokens": 42,
+      "prefill_tokens": 12,
+      "reused_tokens": 30,
+      "token_ids": [
+        109153,
+        1
+      ],
+      "text": "小林",
+      "finish_reason": "eos",
+      "prefill_seconds": 1.6438057519844733,
+      "decode_seconds": [
+        1.412762243009638
+      ],
+      "torch_comparison": [],
+      "turn": 3,
+      "history_tokens": 44
+    },
+    {
+      "session": 2,
+      "prompt": "4 + 5 等于几？只回答数字。",
+      "prompt_tokens": 16,
+      "prefill_tokens": 16,
+      "reused_tokens": 0,
+      "token_ids": [
+        27,
+        1
+      ],
+      "text": "9",
+      "finish_reason": "eos",
+      "prefill_seconds": 0.5444365079747513,
+      "decode_seconds": [
+        0.2759260790189728
+      ],
+      "torch_comparison": [],
+      "turn": 1,
+      "history_tokens": 18
+    },
+    {
+      "session": 3,
+      "prompt": "请从1数到100，每个数字用逗号分隔，不要解释。",
+      "prompt_tokens": 21,
+      "prefill_tokens": 21,
+      "reused_tokens": 0,
+      "token_ids": [
+        19,
+        14,
+        223,
+        20,
+        14,
+        223,
+        21,
+        14,
+        223,
+        22,
+        14,
+        223,
+        23,
+        14,
+        223,
+        24,
+        14,
+        223,
+        25,
+        14,
+        223,
+        26,
+        14,
+        223
+      ],
+      "text": "1, 2, 3, 4, 5, 6, 7, 8, ",
+      "finish_reason": "length",
+      "prefill_seconds": 4.568754550011363,
+      "decode_seconds": [
+        1.4263701229938306,
+        1.4281708039925434,
+        1.404076662962325,
+        1.4264730280265212,
+        1.419156681979075,
+        1.4284562949906103,
+        1.4215937270200811,
+        1.4349666950292885,
+        0.27582048100885004,
+        1.428586536028888,
+        1.4149666810408235,
+        1.4200351019972004,
+        1.446123706002254,
+        1.4247234410140663,
+        1.4279922179994173,
+        1.4225544729852118,
+        1.4319773759925738,
+        1.4403943590004928,
+        1.4370985259884037,
+        1.42466348601738,
+        1.4413252279628068,
+        0.2675819890573621,
+        1.4139756359509192
+      ],
+      "torch_comparison": [],
+      "turn": 1,
+      "history_tokens": 46
+    },
+    {
+      "session": 3,
+      "prompt": "刚才我让你做什么？请简短回答。",
+      "prompt_tokens": 58,
+      "prefill_tokens": 14,
+      "reused_tokens": 44,
+      "token_ids": [
+        804,
+        10539,
+        1255,
+        19,
+        996,
+        621,
+        1457,
+        303,
+        7849,
+        8283,
+        642,
+        33347,
+        2449,
+        74534,
+        303,
+        4916,
+        9068,
+        320,
+        1
+      ],
+      "text": "你让我从1数到100，每个数字用逗号分隔，不要解释。",
+      "finish_reason": "eos",
+      "prefill_seconds": 3.119765632029157,
+      "decode_seconds": [
+        1.4267164759803563,
+        1.4139433119562455,
+        1.438383368018549,
+        1.4328396890196018,
+        1.4403361619915813,
+        1.4030682800221257,
+        1.5534088940476067,
+        1.7285135459969752,
+        1.611780066974461,
+        1.4905494829872623,
+        1.5069070560275577,
+        1.603677918028552,
+        1.4727992140105926,
+        1.4690042169531807,
+        1.448790961992927,
+        1.7600527869653888,
+        1.606292573036626,
+        1.506876254978124
+      ],
+      "torch_comparison": [],
+      "turn": 2,
+      "history_tokens": 77
+    }
+  ]
+}

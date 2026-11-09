@@ -1,0 +1,35 @@
+{
+  "suite": "unittest discover -s tests -v",
+  "interpreter": "/home/ubuntu/yqf-intern/.venv/bin/python",
+  "environment": {
+    "CUDA_VISIBLE_DEVICES": "",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "src",
+    "OMP_NUM_THREADS": "2",
+    "MKL_NUM_THREADS": "2"
+  },
+  "tests_run": 160,
+  "tests_passed": 130,
+  "tests_skipped": 30,
+  "duration_seconds": 31.133,
+  "new_deepseek_tests": 29,
+  "skip_reasons": {
+    "requires the serving dependency": 5,
+    "requires CUDA and flashinfer": 5,
+    "requires CUDA, flashinfer and Triton": 1,
+    "requires CUDA": 2,
+    "requires transformers with Qwen3.5": 1,
+    "requires the model dependency": 2,
+    "requires pillow and transformers with Qwen3.5": 1,
+    "requires pillow, CUDA and flashinfer": 1,
+    "requires pillow": 9,
+    "requires the local Qwen3 tokenizer artifact": 3
+  },
+  "ruff_changed_python_files": "passed",
+  "git_diff_check": "passed",
+  "reference_worktrees": {
+    "vllm": "clean",
+    "sglang": "clean"
+  },
+  "scope": "phase 1 CPU reference and header audit; real quantized model generation is not implemented"
+}

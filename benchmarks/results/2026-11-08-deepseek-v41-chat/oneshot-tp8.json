@@ -1,0 +1,61 @@
+{
+  "model": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main",
+  "config": "/spiritx/nfs_data/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/main/inference/config.json",
+  "tp_size": 8,
+  "backend": "triton",
+  "precision": "MXFP4 experts / MXFP8 dense / BF16 activations",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "gpu": "NVIDIA H20-3e",
+  "load_seconds": 13.337011216965038,
+  "load_report": {
+    "shards": 48,
+    "tensor_count": 96085,
+    "checkpoint_bytes": 510286023000,
+    "header_bytes_read": 10685312,
+    "headers_sha256": "48407268fc4668288501ff5aa08b8965c81f9aafc55e3fad44647e5238163bb5",
+    "rank": 0,
+    "world_size": 8,
+    "loaded_tensors": 12738,
+    "loaded_bytes": 64986171656,
+    "source_bytes_copied": 64818563336,
+    "excluded_groups": [
+      "vision",
+      "draft"
+    ],
+    "chunk_bytes": 67108864
+  },
+  "peak_allocated_bytes": 67020746240,
+  "peak_reserved_bytes": 73899442176,
+  "interactive": false,
+  "generations": [
+    {
+      "prompt": "What is 2 + 2? Answer with just the number.",
+      "prompt_tokens": 18,
+      "prefill_tokens": 18,
+      "reused_tokens": 0,
+      "token_ids": [
+        22,
+        1
+      ],
+      "text": "4",
+      "finish_reason": "eos",
+      "prefill_seconds": 3.9915839820168912,
+      "decode_seconds": [
+        1.3864538029883988
+      ],
+      "torch_comparison": [
+        {
+          "max_abs_error": 2.360508918762207,
+          "cosine_similarity": 0.98627108335495,
+          "greedy_equal": true
+        },
+        {
+          "max_abs_error": 2.575681686401367,
+          "cosine_similarity": 0.9839527606964111,
+          "greedy_equal": true
+        }
+      ]
+    }
+  ]
+}
